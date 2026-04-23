@@ -128,17 +128,38 @@ def save_outputs(img_tensor: torch.Tensor,
                  out_dir: str,
                  fname: str,
                  threshold: float,
-                 min_area: int):
-    # Convert normalized tensor -> PIL directly (no disk re-read)
+                 min_area: int,
+                 save_size=(1920, 1080)):
+    # Convert normalized tensor -> PIL
     mean = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
     std  = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
     img_u8 = ((img_tensor.cpu() * std + mean).clamp(0, 1) * 255).byte()
     img_pil = Image.fromarray(img_u8.permute(1, 2, 0).numpy())
 
+    # Original bboxes are on 512x512 space
     bboxes = anomaly_map_to_bboxes(anomaly_map, threshold=threshold, min_area=min_area)
-    boxed = draw_bboxes_on_image(img_pil, bboxes, color='red', width=3)
+
+    # Resize image to final save size: (width, height)
+    target_w, target_h = save_size
+    src_w, src_h = img_pil.size
+    resized_img = img_pil.resize((target_w, target_h), Image.BILINEAR)
+
+    # Scale bbox coordinates to the new size
+    scale_x = target_w / src_w
+    scale_y = target_h / src_h
+    scaled_bboxes = [
+        (
+            int(x0 * scale_x),
+            int(y0 * scale_y),
+            int(x1 * scale_x),
+            int(y1 * scale_y),
+        )
+        for x0, y0, x1, y1 in bboxes
+    ]
+
+    boxed = draw_bboxes_on_image(resized_img, scaled_bboxes, color='red', width=6)
     boxed.save(os.path.join(out_dir, fname))
-    return bboxes
+    return scaled_bboxes
 
 
 @torch.no_grad()
