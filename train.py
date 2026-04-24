@@ -111,7 +111,7 @@ def inference_meta_epoch(c, epoch, loader, extractor, parallel_flows, fusion_flo
                 if idx == 0:
                     size_list.append(list(z.shape[-2:]))
                 logp = - 0.5 * torch.mean(z**2, 1)
-                outputs_list[lvl].append(logp)
+                outputs_list[lvl].append(logp.detach().cpu())
                 loss += 0.5 * torch.sum(z**2, (1, 2, 3))
 
             loss = loss - jac
@@ -178,7 +178,13 @@ def train(c):
         epoch = start_epoch + 1
         gt_label_list, gt_mask_list, outputs_list, size_list = inference_meta_epoch(c, epoch, test_loader, extractor, parallel_flows, fusion_flow)
 
-        anomaly_score, anomaly_score_map_add, anomaly_score_map_mul = post_process(c, size_list, outputs_list)
+        has_pixel_labels = np.any(np.asarray(gt_mask_list))
+        anomaly_score, anomaly_score_map_add, anomaly_score_map_mul = post_process(
+            c,
+            size_list,
+            outputs_list,
+            return_maps=has_pixel_labels
+        )
         best_det_auroc, best_loc_auroc, best_loc_pro = eval_det_loc(det_auroc_obs, loc_auroc_obs, loc_pro_obs, epoch, gt_label_list, anomaly_score, gt_mask_list, anomaly_score_map_add, anomaly_score_map_mul, c.pro_eval)
         
         return
@@ -212,7 +218,13 @@ def train(c):
 
         gt_label_list, gt_mask_list, outputs_list, size_list = inference_meta_epoch(c, epoch, test_loader, extractor, parallel_flows, fusion_flow)
 
-        anomaly_score, anomaly_score_map_add, anomaly_score_map_mul = post_process(c, size_list, outputs_list)
+        has_pixel_labels = np.any(np.asarray(gt_mask_list))
+        anomaly_score, anomaly_score_map_add, anomaly_score_map_mul = post_process(
+            c,
+            size_list,
+            outputs_list,
+            return_maps=has_pixel_labels
+        )
 
         if c.pro_eval and (epoch > 0 and epoch % c.pro_eval_interval == 0):
             pro_eval = True
