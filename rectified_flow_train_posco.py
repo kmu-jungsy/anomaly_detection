@@ -302,6 +302,8 @@ def build_args():
     parser = argparse.ArgumentParser(description='Rectified-Flow on top of MSFlow')
     parser.add_argument('--dataset', default='posco', choices=['mvtec', 'visa', 'posco'])
     parser.add_argument('--class-name', default='posco', type=str)
+    parser.add_argument("--posco-train-subdir", default="", type=str,
+                        help="For POSCO, train RF using only data_path/train/<subdir>.")
     parser.add_argument('--mode', default='train', choices=['train', 'test'])
     parser.add_argument('--batch-size', default=8, type=int)
     parser.add_argument('--workers', default=4, type=int)
@@ -347,6 +349,18 @@ def init_seeds(seed: int):
 def resolve_defaults(c, args):
     c.dataset = args.dataset
     c.class_name = args.class_name
+    # POSCO folder-specific training support.
+    # datasets.POSCODataset reads c.posco_train_subdir and uses:
+    #   data/posco/train/<posco_train_subdir>/*.png
+    if c.dataset == 'posco':
+        if getattr(args, 'posco_train_subdir', ''):
+            c.posco_train_subdir = args.posco_train_subdir
+        elif args.class_name != 'posco':
+            c.posco_train_subdir = args.class_name
+        else:
+            c.posco_train_subdir = None
+    else:
+        c.posco_train_subdir = None
     c.extractor = args.extractor
     c.pool_type = args.pool_type
     c.parallel_blocks = args.parallel_blocks
@@ -556,6 +570,7 @@ def main():
         for i, class_name in enumerate(class_names, start=1):
             run_args = copy.deepcopy(args)
             run_args.class_name = class_name
+            run_args.posco_train_subdir = class_name
             # In folder mode, construct the checkpoint path from msflow-work-dir/version/dataset/class-name.
             run_args.msflow_ckpt = ''
             print('\n' + '=' * 80)
