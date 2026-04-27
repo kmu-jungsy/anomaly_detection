@@ -5,6 +5,7 @@ import math
 import time
 import datetime
 import argparse
+import copy
 from typing import List, Tuple, Optional
 
 import numpy as np
@@ -310,6 +311,11 @@ def build_args():
     parser.add_argument('--parallel-blocks', default=[2, 5, 8], type=int, nargs='+')
 
     parser.add_argument('--msflow-ckpt', default='work_dirs/msflow_wide_resnet50_2_avgpool_pl258/posco/posco/last.pt', type=str)
+    parser.add_argument('--train-by-msflow-folder', action='store_true', default=False,
+                        help='For POSCO, train one RF model for each MSFlow checkpoint folder under '
+                             'msflow-work-dir/msflow-version/dataset/<folder>/msflow-ckpt-name.')
+    parser.add_argument('--msflow-class-names', default=None, type=str, nargs='+',
+                        help='Optional folder/class names to train. If omitted, all checkpoint folders are used.')
     parser.add_argument('--msflow-work-dir', default='work_dirs', type=str)
     parser.add_argument('--msflow-version', default='msflow_wide_resnet50_2_avgpool_pl258', type=str)
     parser.add_argument('--msflow-ckpt-name', default='last.pt', type=str)
@@ -414,6 +420,49 @@ def select_dataset_class(name: str):
     raise ValueError(f'Unsupported dataset: {name}')
 
 
+def discover_msflow_class_names(args) -> List[str]:
+    """Return folder names that contain an MSFlow checkpoint.
+
+    Expected structure:
+        <msflow_work_dir>/<msflow_version>/<dataset>/<class_name>/<msflow_ckpt_name>
+
+    Example:
+        work_dirs/msflow_wide_resnet50_2_avgpool_pl258/posco/01/last.pt
+        work_dirs/msflow_wide_resnet50_2_avgpool_pl258/posco/02/last.pt
+    """
+    base_dir = os.path.join(args.msflow_work_dir, args.msflow_version, args.dataset)
+    if not os.path.isdir(base_dir):
+        raise FileNotFoundError(f'MSFlow checkpoint folder not found: {base_dir}')
+
+    if args.msflow_class_names:
+        class_names = list(args.msflow_class_names)
+    else:
+        class_names = sorted(
+            name for name in os.listdir(base_dir)
+            if os.path.isdir(os.path.join(base_dir, name))
+        )
+
+    valid_class_names = []
+    missing = []
+    for class_name in class_names:
+        ckpt_path = os.path.join(base_dir, class_name, args.msflow_ckpt_name)
+        if os.path.isfile(ckpt_path):
+            valid_class_names.append(class_name)
+        else:
+            missing.append(ckpt_path)
+
+    if missing:
+        print('[Warning] These MSFlow checkpoints were not found and will be skipped:')
+        for path in missing:
+            print(f'  - {path}')
+
+    if not valid_class_names:
+        raise FileNotFoundError(
+            f'No MSFlow checkpoints named {args.msflow_ckpt_name!r} were found under {base_dir}'
+        )
+    return valid_class_names
+
+
 def train_rf(args):
     import default as c
     c = resolve_defaults(c, args)
@@ -491,11 +540,30 @@ def train_rf(args):
             ckpt_last = os.path.join(c.ckpt_dir, 'rf_last.pt')
             torch.save({'rf_model': rf_model.state_dict(), 'optimizer': optimizer.state_dict(), 'epoch': epoch}, ckpt_last)
 
+    if rf_model is not None:
+        print(f'[RF] saved last checkpoint: {os.path.join(c.ckpt_dir, "rf_last.pt")}')
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
 
 def main():
     parser = build_args()
     args = parser.parse_args()
-    train_rf(args)
+
+    if args.train_by_msflow_folder:
+        class_names = discover_msflow_class_names(args)
+        print(f'[RF] train-by-msflow-folder enabled. Found {len(class_names)} MSFlow model(s): {class_names}')
+        for i, class_name in enumerate(class_names, start=1):
+            run_args = copy.deepcopy(args)
+            run_args.class_name = class_name
+            # In folder mode, construct the checkpoint path from msflow-work-dir/version/dataset/class-name.
+            run_args.msflow_ckpt = ''
+            print('\n' + '=' * 80)
+            print(f'[RF] ({i}/{len(class_names)}) Train RF for MSFlow class/folder: {class_name}')
+            print('=' * 80)
+            train_rf(run_args)
+    else:
+        train_rf(args)
 
 
 if __name__ == '__main__':
