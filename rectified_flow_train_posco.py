@@ -488,16 +488,8 @@ def train_rf(args):
             optimizer.step()
 
         if rf_model is not None:
-            det_auroc, loc_auroc, loc_pro_auc, best_det_auroc, best_loc_auroc, best_loc_pro = eval_rf_epoch(
-                c, epoch, test_loader, extractor, parallel_flows, fusion_flow, rf_model, args.rf_steps,
-                det_auroc_obs, loc_auroc_obs, loc_pro_obs,
-                pro_eval=c.pro_eval and (epoch > 0 and epoch % c.pro_eval_interval == 0)
-            )
             ckpt_last = os.path.join(c.ckpt_dir, 'rf_last.pt')
             torch.save({'rf_model': rf_model.state_dict(), 'optimizer': optimizer.state_dict(), 'epoch': epoch}, ckpt_last)
-            if best_det_auroc:
-                torch.save({'rf_model': rf_model.state_dict(), 'optimizer': optimizer.state_dict(), 'epoch': epoch},
-                           os.path.join(c.ckpt_dir, 'rf_best_det_auroc.pt'))
 
 
 def main():
