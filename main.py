@@ -15,48 +15,50 @@ def init_seeds(seed=0):
 
 def parsing_args(c):
     parser = argparse.ArgumentParser(description='msflow')
-    parser.add_argument('--dataset', default='mvtec', type=str, 
+    parser.add_argument('--dataset', default='mvtec', type=str,
                         choices=['mvtec', 'visa', 'posco'], help='dataset name')
-    parser.add_argument('--mode', default='train', type=str, 
+    parser.add_argument('--mode', default='train', type=str,
                         help='train or test.')
-    parser.add_argument('--amp_enable', action='store_true', default=False, 
+    parser.add_argument('--amp_enable', action='store_true', default=False,
                         help='use amp or not.')
-    parser.add_argument('--wandb_enable', action='store_true', default=False, 
+    parser.add_argument('--wandb_enable', action='store_true', default=False,
                         help='use wandb for result logging or not.')
-    parser.add_argument('--resume', action='store_true', default=False, 
+    parser.add_argument('--resume', action='store_true', default=False,
                         help='resume training or not.')
-    parser.add_argument('--eval_ckpt', default='', type=str, 
+    parser.add_argument('--eval_ckpt', default='', type=str,
                         help='checkpoint path for evaluation.')
-    parser.add_argument('--class-names', default=['all'], type=str, nargs='+', 
+    parser.add_argument('--class-names', default=['all'], type=str, nargs='+',
                         help='class names for training')
-    parser.add_argument('--lr', default=1e-4, type=float, 
+    parser.add_argument('--lr', default=1e-4, type=float,
                         help='learning rate')
-    parser.add_argument('--batch-size', default=8, type=int, 
+    parser.add_argument('--batch-size', default=8, type=int,
                         help='train batch size')
     parser.add_argument('--meta-epochs', default=25, type=int,
                         help='number of meta epochs to train')
     parser.add_argument('--sub-epochs', default=4, type=int,
                         help='number of sub epochs to train')
-    parser.add_argument('--extractor', default='wide_resnet50_2', type=str, 
+    parser.add_argument('--extractor', default='wide_resnet50_2', type=str,
                         help='feature extractor')
-    parser.add_argument('--pool-type', default='avg', type=str, 
+    parser.add_argument('--pool-type', default='avg', type=str,
                         help='pool type for extracted feature maps')
     parser.add_argument('--parallel-blocks', default=[2, 5, 8], type=int, metavar='L', nargs='+',
                         help='number of flow blocks used in parallel flows.')
-    parser.add_argument('--pro-eval', action='store_true', default=False, 
+    parser.add_argument('--pro-eval', action='store_true', default=False,
                         help='evaluate the pro score or not.')
-    parser.add_argument('--pro-eval-interval', default=4, type=int, 
+    parser.add_argument('--pro-eval-interval', default=4, type=int,
                         help='interval for pro evaluation.')
     parser.add_argument('--data-path', default='', type=str,
                         help='override dataset root path')
     parser.add_argument('--train-ratio', default=0.8, type=float,
                         help='ratio of normal images used for training in posco dataset')
+    parser.add_argument('--posco-train-by-folder', action='store_true', default=False,
+                        help='for POSCO: train one model per subfolder inside data_path/train')
 
     args = parser.parse_args()
 
     for k, v in vars(args).items():
         setattr(c, k, v)
-    
+
     if c.dataset == 'mvtec':
         from datasets import MVTEC_CLASS_NAMES
         setattr(c, 'data_path', './data/MVTec')
@@ -89,8 +91,36 @@ def main(c):
     init_seeds(seed=c.seed)
     c.version_name = 'msflow_{}_{}pool_pl{}'.format(c.extractor, c.pool_type, "".join([str(x) for x in c.parallel_blocks]))
     print(c.class_names)
+
+    # POSCO special mode:
+    # If data/posco/train contains subfolders and --posco-train-by-folder is used,
+    # train one independent model per subfolder.
+    # Example:
+    #   data/posco/train/01/*.png  -> work_dirs/.../posco/01/last.pt
+    #   data/posco/train/02/*.png  -> work_dirs/.../posco/02/last.pt
+    if c.dataset == 'posco' and getattr(c, 'posco_train_by_folder', False):
+        train_root = os.path.join(c.data_path, 'train')
+        train_folders = sorted([
+            d for d in os.listdir(train_root)
+            if os.path.isdir(os.path.join(train_root, d))
+        ])
+        if len(train_folders) == 0:
+            raise ValueError(
+                f"--posco-train-by-folder was enabled, but no subfolders were found in: {train_root}"
+            )
+
+        print(f"Found {len(train_folders)} POSCO train folders: {train_folders}")
+        for folder_name in train_folders:
+            c.class_name = folder_name
+            c.posco_train_subdir = folder_name
+            print('-+'*5, f'posco/{folder_name}', '+-'*5)
+            c.ckpt_dir = os.path.join(c.work_dir, c.version_name, c.dataset, folder_name)
+            train(c)
+        return
+
     for class_name in c.class_names:
         c.class_name = class_name
+        c.posco_train_subdir = None
         print('-+'*5, class_name, '+-'*5)
         c.ckpt_dir = os.path.join(c.work_dir, c.version_name, c.dataset, c.class_name)
         train(c)
