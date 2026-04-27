@@ -216,36 +216,7 @@ def train(c):
         print()
         train_meta_epoch(c, epoch, train_loader, extractor, parallel_flows, fusion_flow, params, optimizer, warmup_scheduler, decay_scheduler, scaler if c.amp_enable else None)
 
-        gt_label_list, gt_mask_list, outputs_list, size_list = inference_meta_epoch(c, epoch, test_loader, extractor, parallel_flows, fusion_flow)
-
-        has_pixel_labels = np.any(np.asarray(gt_mask_list))
-        anomaly_score, anomaly_score_map_add, anomaly_score_map_mul = post_process(
-            c,
-            size_list,
-            outputs_list,
-            return_maps=has_pixel_labels
-        )
-
-        if c.pro_eval and (epoch > 0 and epoch % c.pro_eval_interval == 0):
-            pro_eval = True
-        else:
-            pro_eval = False
-
-        det_auroc, loc_auroc, loc_pro_auc, \
-            best_det_auroc, best_loc_auroc, best_loc_pro = \
-                eval_det_loc(det_auroc_obs, loc_auroc_obs, loc_pro_obs, epoch, gt_label_list, anomaly_score, gt_mask_list, anomaly_score_map_add, anomaly_score_map_mul, pro_eval)
-
-        if c.wandb_enable:
-            wandb_run.log(
-                {
-                    'Det.AUROC': det_auroc,
-                    'Loc.AUROC': loc_auroc,
-                    'Loc.PRO': loc_pro_auc
-                },
-                step=epoch
-            )
-
-        # save_weights(epoch, parallel_flows, fusion_flow, 'last', c.ckpt_dir, optimizer)
+        save_weights(epoch, parallel_flows, fusion_flow, 'last', c.ckpt_dir, optimizer)    
         # if best_det_auroc and c.mode == 'train':
         #     save_weights(epoch, parallel_flows, fusion_flow, 'best_det', c.ckpt_dir)
         # if best_loc_auroc and c.mode == 'train':
