@@ -564,21 +564,10 @@ def main():
     parser = build_args()
     args = parser.parse_args()
 
-    if args.train_by_msflow_folder:
-        class_names = discover_msflow_class_names(args)
-        print(f'[RF] train-by-msflow-folder enabled. Found {len(class_names)} MSFlow model(s): {class_names}')
-        for i, class_name in enumerate(class_names, start=1):
-            run_args = copy.deepcopy(args)
-            run_args.class_name = class_name
-            run_args.posco_train_subdir = class_name
-            # In folder mode, construct the checkpoint path from msflow-work-dir/version/dataset/class-name.
-            run_args.msflow_ckpt = ''
-            print('\n' + '=' * 80)
-            print(f'[RF] ({i}/{len(class_names)}) Train RF for MSFlow class/folder: {class_name}')
-            print('=' * 80)
-            train_rf(run_args)
-    else:
-        train_rf(args)
+    args.class_name = "posco"
+    args.posco_train_subdir = None
+
+    train_rf(args)
 
 
 if __name__ == '__main__':
