@@ -402,13 +402,10 @@ def run_single_model(args):
     rf_model = build_rf_from_batch(cfg.device, args.rf_ckpt, z_fused_list, args.rf_tdims, args.rf_depths)
 
     seen_dirs = set()
-    total_processed = 0
-    start = time.time()
 
     for imgs, img_paths, subdirs, fnames in loader:
         imgs = imgs.to(cfg.device, non_blocking=True)
         final_maps = get_final_localization_map(cfg, extractor, parallel_flows, fusion_flow, rf_model, imgs, args.rf_steps)
-        total_processed += imgs.shape[0]
 
         for b in range(imgs.shape[0]):
             final_map = final_maps[b]
@@ -422,9 +419,8 @@ def run_single_model(args):
 
             save_outputs(imgs[b], final_map, out_dir, fnames[b], args.threshold, args.min_area)
 
-    fps = total_processed / max(time.time() - start, 1e-6)
     print(datetime.datetime.now().strftime('[%Y-%m-%d-%H:%M:%S]'),
-          f'Done. Processed {total_processed} images, FPS: {fps:.1f}')
+          f'Done. Processed {total_processed} images')
 
 
 def main():
