@@ -19,7 +19,7 @@ lr_warmup = True
 lr_warmup_from = 0.1
 lr_warmup_epochs = 3
 batch_size = 16
-workers = 4
+workers = 2
 
 
 # dataset
