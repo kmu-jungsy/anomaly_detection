@@ -2,7 +2,6 @@ import os, random
 import numpy as np
 import torch
 import argparse
-import wandb
 
 from train import train
 
@@ -15,7 +14,7 @@ def init_seeds(seed=0):
 
 def parsing_args(c):
     parser = argparse.ArgumentParser(description='msflow')
-    parser.add_argument('--dataset', default='mvtec', type=str,
+    parser.add_argument('--dataset', default='posco', type=str,
                         choices=['mvtec', 'visa', 'posco'], help='dataset name')
     parser.add_argument('--mode', default='train', type=str,
                         help='train or test.')
