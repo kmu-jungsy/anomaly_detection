@@ -225,24 +225,31 @@ class POSCODataset(Dataset):
     def load_dataset_folder(self):
         exts = ('.jpg', '.jpeg', '.png', '.bmp', '.tif', '.tiff', '.webp')
 
+        def collect_images(root_dir):
+            """Collect image files recursively under root_dir."""
+            image_paths = []
+            for dirpath, _, filenames in os.walk(root_dir):
+                for fname in filenames:
+                    if fname.lower().endswith(exts):
+                        image_paths.append(os.path.join(dirpath, fname))
+            return sorted(image_paths)
+
         if self.is_train:
             train_dir = os.path.join(self.dataset_path, 'train')
 
             # When main.py sets self.train_subdir, train only on that folder.
-            # Example: data/posco/train/02/*.png
+            # Example: data/posco/train/02/*.jpg
+            # Otherwise, train on the whole POSCO train set recursively:
+            # Example: data/posco/train/01/*.jpg + ... + data/posco/train/10/*.jpg
             if self.train_subdir:
                 train_dir = os.path.join(train_dir, self.train_subdir)
 
             assert os.path.isdir(train_dir), f"Missing train folder: {train_dir}"
 
-            train_paths = sorted([
-                os.path.join(train_dir, f)
-                for f in os.listdir(train_dir)
-                if f.lower().endswith(exts)
-            ])
+            train_paths = collect_images(train_dir)
 
             assert len(train_paths) > 0, f"No training images found in: {train_dir}"
-            print(f"POSCO train folder: {train_dir} ({len(train_paths)} images)")
+            print(f"POSCO train folder: {train_dir} ({len(train_paths)} images, recursive=True)")
 
             x = train_paths
             y = [0] * len(train_paths)   # all training images are normal
@@ -254,21 +261,19 @@ class POSCODataset(Dataset):
             assert os.path.isdir(test_normal_dir), f"Missing test normal folder: {test_normal_dir}"
             assert os.path.isdir(test_abnormal_dir), f"Missing test abnormal folder: {test_abnormal_dir}"
 
-            normal_paths = sorted([
-                os.path.join(test_normal_dir, f)
-                for f in os.listdir(test_normal_dir)
-                if f.lower().endswith(exts)
-            ])
-
-            abnormal_paths = sorted([
-                os.path.join(test_abnormal_dir, f)
-                for f in os.listdir(test_abnormal_dir)
-                if f.lower().endswith(exts)
-            ])
+            # Supports both:
+            #   data/posco/test/normal/*.jpg
+            #   data/posco/test/normal/01/*.jpg, data/posco/test/normal/02/*.jpg, ...
+            normal_paths = collect_images(test_normal_dir)
+            abnormal_paths = collect_images(test_abnormal_dir)
 
             assert len(normal_paths) + len(abnormal_paths) > 0, \
                 f"No test images found in: {os.path.join(self.dataset_path, 'test')}"
 
             x = normal_paths + abnormal_paths
             y = [0] * len(normal_paths) + [1] * len(abnormal_paths)
+            print(
+                f"POSCO test folders: normal={len(normal_paths)} images, "
+                f"abnormal={len(abnormal_paths)} images, recursive=True"
+            )
             return x, y
