@@ -3,13 +3,13 @@ import shutil
 import subprocess
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
-from typing import List, Optional, Sequence, Tuple
+from typing import List, Sequence, Tuple
 
 
 SUPPORTED_VIDEO_EXTS = (".avi", ".mp4", ".mov", ".mkv")
 
-# job = (video_path, save_dir, output_ext, mode, interval_sec, jpg_quality, output_stem)
-Job = Tuple[str, str, str, str, float, int, str]
+# job = (video_path, save_dir, output_ext, mode, interval_sec, jpg_quality, output_stem, frame_limit)
+Job = Tuple[str, str, str, str, float, int, str, int]
 
 
 def is_video_file(path: Path) -> bool:
@@ -64,6 +64,7 @@ def collect_train_jobs(
                     interval_sec,
                     jpg_quality,
                     video_path.stem,
+                    0,
                 )
             )
 
@@ -76,13 +77,14 @@ def collect_test_jobs(
     output_root: Path,
     output_ext: str,
     jpg_quality: int,
+    abnormal_num_frames: int,
 ) -> List[Job]:
     """
     Test mode:
       normal:   video/normal/01/*.avi, video/normal/02/*.avi, ... -> data/posco/test/normal/*.jpg
                 Extract only one frame per video.
       abnormal: video/anomaly/*.avi -> data/posco/test/abnormal/*.jpg
-                Extract all frames.
+                Extract only abnormal_num_frames frames per video.
     """
     jobs: List[Job] = []
 
@@ -103,6 +105,7 @@ def collect_test_jobs(
                 0.0,
                 jpg_quality,
                 output_stem,
+                1,
             )
         )
 
@@ -119,10 +122,11 @@ def collect_test_jobs(
                 str(video_path),
                 str(abnormal_save_dir),
                 output_ext,
-                "all_frames",
+                "limited_frames",
                 0.0,
                 jpg_quality,
                 output_stem,
+                abnormal_num_frames,
             )
         )
 
@@ -137,6 +141,7 @@ def run_ffmpeg_job(
     interval_sec: float,
     jpg_quality: int,
     output_stem: str,
+    frame_limit: int,
 ) -> Tuple[str, int, str]:
     video_path = Path(video_path_str)
     save_dir = Path(save_dir_str)
@@ -165,9 +170,11 @@ def run_ffmpeg_job(
         output_pattern = save_dir / f"{output_stem}.{output_ext}"
         cmd += ["-frames:v", "1"]
         count_glob = f"{output_stem}.{output_ext}"
-    elif mode == "all_frames":
+    elif mode == "limited_frames":
+        if frame_limit <= 0:
+            return str(video_path), 0, "[ERROR] frame_limit must be positive for limited_frames mode"
         output_pattern = save_dir / f"{output_stem}_%06d.{output_ext}"
-        cmd += ["-start_number", "0"]
+        cmd += ["-frames:v", str(frame_limit), "-start_number", "0"]
         count_glob = f"{output_stem}_*.{output_ext}"
     else:
         return str(video_path), 0, f"[ERROR] Unknown mode: {mode}"
@@ -279,6 +286,12 @@ def main() -> None:
         default=Path("data/posco/test"),
         help="Test output root. Saves to data/posco/test/normal and data/posco/test/abnormal.",
     )
+    parser.add_argument(
+        "--abnormal-num-frames",
+        type=int,
+        default=10,
+        help="Test mode: extract this many frames per abnormal video. Default: 10",
+    )
 
     # Common arguments
     parser.add_argument(
@@ -337,9 +350,10 @@ def main() -> None:
             output_root=args.test_output_root,
             output_ext=args.output_ext,
             jpg_quality=args.jpg_quality,
+            abnormal_num_frames=args.abnormal_num_frames,
         )
         print("[INFO] Test normal: extract one frame per video")
-        print("[INFO] Test abnormal: extract all frames per video")
+        print(f"[INFO] Test abnormal: extract {args.abnormal_num_frames} frames per video")
         run_jobs(jobs, args.num_workers, args.test_output_root, args.output_ext)
 
 
