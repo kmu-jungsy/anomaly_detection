@@ -196,13 +196,50 @@ def draw_bboxes_on_image(img: Image.Image, bboxes, color='red', width=3):
     return out
 
 
+def save_heatmap_outputs(img_pil: Image.Image,
+                         anomaly_map: np.ndarray,
+                         heatmap_dir: str,
+                         fname: str,
+                         save_size=(1920, 1080),
+                         alpha: float = 0.45):
+    """Save raw heatmap and heatmap-overlaid image."""
+    os.makedirs(heatmap_dir, exist_ok=True)
+
+    target_w, target_h = save_size
+    resized_img = img_pil.resize((target_w, target_h), Image.BILINEAR)
+
+    amap = np.asarray(anomaly_map, dtype=np.float32)
+    if amap.ndim != 2:
+        amap = np.squeeze(amap)
+    amap = amap - np.nanmin(amap)
+    denom = np.nanmax(amap) + 1e-8
+    amap = amap / denom
+    amap_u8 = (amap * 255).clip(0, 255).astype(np.uint8)
+    amap_u8 = cv2.resize(amap_u8, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
+
+    # OpenCV colormap is BGR, convert to RGB for PIL saving.
+    heatmap_bgr = cv2.applyColorMap(amap_u8, cv2.COLORMAP_JET)
+    heatmap_rgb = cv2.cvtColor(heatmap_bgr, cv2.COLOR_BGR2RGB)
+    heatmap_pil = Image.fromarray(heatmap_rgb)
+
+    overlay = Image.blend(resized_img.convert('RGB'), heatmap_pil.convert('RGB'), alpha=alpha)
+
+    stem, ext = os.path.splitext(fname)
+    ext = ext if ext else '.jpg'
+    heatmap_pil.save(os.path.join(heatmap_dir, f"{stem}_heatmap{ext}"))
+    overlay.save(os.path.join(heatmap_dir, f"{stem}_overlay{ext}"))
+
+
 def save_outputs(img_tensor: torch.Tensor,
                  anomaly_map: np.ndarray,
                  out_dir: str,
                  fname: str,
                  threshold: float,
                  min_area: int,
-                 save_size=(1920, 1080)):
+                 save_size=(1920, 1080),
+                 heatmap_dir: Optional[str] = None,
+                 save_heatmap: bool = True,
+                 heatmap_alpha: float = 0.45):
     mean = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
     std = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
     img_u8 = ((img_tensor.cpu() * std + mean).clamp(0, 1) * 255).byte()
@@ -223,6 +260,19 @@ def save_outputs(img_tensor: torch.Tensor,
 
     boxed = draw_bboxes_on_image(resized_img, scaled_bboxes, color='red', width=6)
     boxed.save(os.path.join(out_dir, fname))
+
+    if save_heatmap:
+        if heatmap_dir is None:
+            heatmap_dir = os.path.join(out_dir, 'heatmaps')
+        save_heatmap_outputs(
+            img_pil=img_pil,
+            anomaly_map=anomaly_map,
+            heatmap_dir=heatmap_dir,
+            fname=fname,
+            save_size=save_size,
+            alpha=heatmap_alpha,
+        )
+
     return scaled_bboxes
 
 
@@ -387,6 +437,7 @@ def run_one_folder(args, folder_name: str):
                 os.makedirs(out_dir, exist_ok=True)
                 seen_dirs.add(out_dir)
 
+            heatmap_dir = os.path.join(args.heatmap_output_dir, folder_name, label_names[b])
             save_outputs(
                 img_tensor=imgs[b],
                 anomaly_map=final_map,
@@ -394,6 +445,9 @@ def run_one_folder(args, folder_name: str):
                 fname=fname,
                 threshold=args.threshold,
                 min_area=args.min_area,
+                heatmap_dir=heatmap_dir,
+                save_heatmap=args.save_heatmap,
+                heatmap_alpha=args.heatmap_alpha,
             )
 
     fps = total_processed / max(time.time() - start, 1e-6)
@@ -444,7 +498,18 @@ def run_single_model(args):
                 os.makedirs(out_dir, exist_ok=True)
                 seen_dirs.add(out_dir)
 
-            save_outputs(imgs[b], final_map, out_dir, fnames[b], args.threshold, args.min_area)
+            heatmap_dir = os.path.join(args.heatmap_output_dir, label_names[b])
+            save_outputs(
+                imgs[b],
+                final_map,
+                out_dir,
+                fnames[b],
+                args.threshold,
+                args.min_area,
+                heatmap_dir=heatmap_dir,
+                save_heatmap=args.save_heatmap,
+                heatmap_alpha=args.heatmap_alpha,
+            )
 
     fps = total_processed / max(time.time() - start, 1e-6)
     print(datetime.datetime.now().strftime('[%Y-%m-%d-%H:%M:%S]'),
@@ -457,6 +522,14 @@ def main():
                         help='POSCO test root containing normal/*.jpg and abnormal/*.jpg')
     parser.add_argument('--output_dir', type=str, default='./results_bboxes_posco_rf_test',
                         help='Where to save images with bounding boxes')
+    parser.add_argument('--heatmap_output_dir', type=str, default='./results_heatmaps_posco_rf_test',
+                        help='Where to save heatmap and heatmap-overlay images')
+    parser.add_argument('--save_heatmap', action='store_true', default=True,
+                        help='Save heatmap and heatmap-overlay images. Default: True')
+    parser.add_argument('--no_save_heatmap', dest='save_heatmap', action='store_false',
+                        help='Disable heatmap saving')
+    parser.add_argument('--heatmap_alpha', type=float, default=0.45,
+                        help='Overlay strength for heatmap image. Default: 0.45')
 
     # Old single-model mode arguments.
     parser.add_argument('--msflow_ckpt', type=str,
