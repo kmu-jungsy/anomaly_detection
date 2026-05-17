@@ -275,5 +275,6 @@ class POSCODataset(Dataset):
             print(
                 f"POSCO test folders: normal={len(normal_paths)} images, "
                 f"abnormal={len(abnormal_paths)} images, recursive=True"
+              
             )
             return x, y
