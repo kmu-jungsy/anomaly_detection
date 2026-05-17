@@ -81,10 +81,17 @@ class PoscoTestFolderDataset(Dataset):
         return x, img_path, label_name, folder_name, fname
 
 
-class PoscoFlatOrValidationDataset(Dataset):
+class PoscoFlatTestDataset(Dataset):
     """
-    Backward-compatible dataset for old single-model mode.
-    It scans one-level subfolders under data_root.
+    POSCO flat test dataset for the whole POSCO model.
+
+    Expected structure:
+      data/posco/test/
+        normal/*.jpg|jpeg|png|bmp|tif|tiff|webp
+        abnormal/*.jpg|jpeg|png|bmp|tif|tiff|webp
+
+    This also supports nested folders under normal/abnormal, but outputs are grouped
+    only by label name: normal or abnormal.
     """
     def __init__(self, data_root: str, input_size=(512, 512), img_mean=None, img_std=None):
         self.data_root = data_root
@@ -99,27 +106,42 @@ class PoscoFlatOrValidationDataset(Dataset):
     @staticmethod
     def _collect_images(data_root: str):
         exts = ('.jpg', '.jpeg', '.png', '.bmp', '.tif', '.tiff', '.webp')
-        assert os.path.isdir(data_root), f"Image folder not found: {data_root}"
+        assert os.path.isdir(data_root), f"POSCO test root not found: {data_root}"
+
         img_info = []
-        for subdir in sorted(os.listdir(data_root)):
-            subdir_path = os.path.join(data_root, subdir)
-            if not os.path.isdir(subdir_path):
-                continue
-            for fname in sorted(os.listdir(subdir_path)):
-                if fname.lower().endswith(exts):
-                    img_info.append((os.path.join(subdir_path, fname), subdir, fname))
-        assert len(img_info) > 0, f"No images found under: {data_root}"
+        for label_name in ['normal', 'abnormal']:
+            label_dir = os.path.join(data_root, label_name)
+            assert os.path.isdir(label_dir), f"Missing POSCO test folder: {label_dir}"
+
+            for dirpath, _, filenames in os.walk(label_dir):
+                rel_dir = os.path.relpath(dirpath, label_dir)
+                rel_prefix = '' if rel_dir == '.' else rel_dir.replace(os.sep, '_') + '_'
+                for fname in sorted(filenames):
+                    if not fname.lower().endswith(exts):
+                        continue
+                    img_path = os.path.join(dirpath, fname)
+                    # Keep flat output safe even when nested input folders have same filenames.
+                    save_fname = rel_prefix + fname
+                    img_info.append((img_path, label_name, save_fname))
+
+        assert len(img_info) > 0, (
+            f"No POSCO test images found. Expected images under:\n"
+            f"  {os.path.join(data_root, 'normal')}\n"
+            f"  {os.path.join(data_root, 'abnormal')}"
+        )
+        normal_count = sum(1 for _, label, _ in img_info if label == 'normal')
+        abnormal_count = sum(1 for _, label, _ in img_info if label == 'abnormal')
+        print(f"[INFO] POSCO flat test images: normal={normal_count}, abnormal={abnormal_count}")
         return img_info
 
     def __len__(self):
         return len(self.img_info_list)
 
     def __getitem__(self, idx):
-        img_path, subdir, fname = self.img_info_list[idx]
+        img_path, label_name, save_fname = self.img_info_list[idx]
         img = Image.open(img_path).convert('RGB')
         x = self.transform(img)
-        return x, img_path, subdir, fname
-
+        return x, img_path, label_name, save_fname
 
 def build_msflow(cfg, ckpt_path: str):
     extractor, output_channels = build_extractor(cfg)
@@ -248,6 +270,8 @@ def setup_cfg(args, folder_name: Optional[str] = None):
     c.c_conds = args.c_conds
     c.clamp_alpha = args.clamp_alpha
     c.dataset = 'posco'
+    c.class_name = 'posco'
+    c.posco_train_subdir = None
     if folder_name is not None:
         c.class_name = folder_name
         c.posco_train_subdir = folder_name
@@ -386,8 +410,8 @@ def run_single_model(args):
     assert os.path.isfile(args.msflow_ckpt), f"MSFlow checkpoint not found: {args.msflow_ckpt}"
     assert os.path.isfile(args.rf_ckpt), f"RF checkpoint not found: {args.rf_ckpt}"
 
-    dataset = PoscoFlatOrValidationDataset(args.data_root, input_size=cfg.input_size,
-                                           img_mean=cfg.img_mean, img_std=cfg.img_std)
+    dataset = PoscoFlatTestDataset(args.data_root, input_size=cfg.input_size,
+                                   img_mean=cfg.img_mean, img_std=cfg.img_std)
     loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False,
                         num_workers=args.workers, pin_memory=True)
 
@@ -402,31 +426,35 @@ def run_single_model(args):
     rf_model = build_rf_from_batch(cfg.device, args.rf_ckpt, z_fused_list, args.rf_tdims, args.rf_depths)
 
     seen_dirs = set()
+    total_processed = 0
+    start = time.time()
 
-    for imgs, img_paths, subdirs, fnames in loader:
+    for imgs, img_paths, label_names, fnames in loader:
         imgs = imgs.to(cfg.device, non_blocking=True)
         final_maps = get_final_localization_map(cfg, extractor, parallel_flows, fusion_flow, rf_model, imgs, args.rf_steps)
+        total_processed += imgs.shape[0]
 
         for b in range(imgs.shape[0]):
             final_map = final_maps[b]
             if torch.is_tensor(final_map):
                 final_map = final_map.detach().cpu().numpy()
 
-            out_dir = os.path.join(args.output_dir, subdirs[b])
+            out_dir = os.path.join(args.output_dir, label_names[b])
             if out_dir not in seen_dirs:
                 os.makedirs(out_dir, exist_ok=True)
                 seen_dirs.add(out_dir)
 
             save_outputs(imgs[b], final_map, out_dir, fnames[b], args.threshold, args.min_area)
 
+    fps = total_processed / max(time.time() - start, 1e-6)
     print(datetime.datetime.now().strftime('[%Y-%m-%d-%H:%M:%S]'),
-          f'Done. Processed {total_processed} images')
+          f'Done. Processed {total_processed} images, FPS: {fps:.1f}')
 
 
 def main():
     parser = argparse.ArgumentParser(description='Visualize POSCO bounding boxes from MSFlow+RF localization map')
     parser.add_argument('--data_root', type=str, default='./data/posco/test',
-                        help='POSCO test root containing normal/<folder> and abnormal/<folder>')
+                        help='POSCO test root containing normal/*.jpg and abnormal/*.jpg')
     parser.add_argument('--output_dir', type=str, default='./results_bboxes_posco_rf_test',
                         help='Where to save images with bounding boxes')
 
