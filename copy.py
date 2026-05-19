@@ -4,36 +4,48 @@ import re
 
 folder = Path("data/posco/train/01")
 
-# Match only:
-# [CH001] 0220_0240_000000.jpg
-# [CH001] 0220_0240_000001.jpg
-# ...
-pattern = re.compile(r"^(\[CH001\] 0220_0240_)(\d{6})(\.jpg)$")
+# Select by filename prefix
+selected_prefix = "[CH001] 0220_0240"
 
-images = sorted(folder.glob("*.jpg"))
+# Match: [CH001] 0220_0240_000000.jpg
+pattern = re.compile(r"^(.*_)(\d{6})(\.jpg)$")
 
-print("Folder exists:", folder.exists())
-print("Found jpg images:", len(images))
+# Select only images starting with selected_prefix
+selected_images = sorted(folder.glob(f"{selected_prefix}_*.jpg"))
 
-offset = 90
+print("Selected images:", len(selected_images))
 
-for img_path in images:
+if len(selected_images) == 0:
+    print("No images found. Check selected_prefix or folder path.")
+    exit()
+
+# Find max number among all jpg images with this filename pattern
+all_images = sorted(folder.glob("*.jpg"))
+numbers = []
+
+for img_path in all_images:
+    match = pattern.match(img_path.name)
+    if match:
+        numbers.append(int(match.group(2)))
+
+if len(numbers) == 0:
+    print("No numbered jpg images found.")
+    exit()
+
+start_number = max(numbers) + 1
+print("New copied images will start from:", start_number)
+
+for idx, img_path in enumerate(selected_images):
     match = pattern.match(img_path.name)
 
-    # Skip other jpg files
     if not match:
-        print(f"Skip: {img_path.name}")
+        print(f"Skip unmatched file: {img_path.name}")
         continue
 
     prefix = match.group(1)
-    number = int(match.group(2))
     suffix = match.group(3)
 
-    # Copy only original 000000 ~ 000089
-    if number < 0 or number > 89:
-        continue
-
-    new_number = number + offset
+    new_number = start_number + idx
     new_name = f"{prefix}{new_number:06d}{suffix}"
     out_path = folder / new_name
 
