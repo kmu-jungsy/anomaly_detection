@@ -58,6 +58,10 @@ def parsing_args(c):
                         help='folder containing POSCO masks such as 02_mask.jpg, 04_mask.jpg')
     parser.add_argument('--posco-mask-threshold', default=10, type=int,
                         help='threshold for binary mask. pixels > threshold are kept, pixels <= threshold become black')
+    parser.add_argument('--posco-save-train-mask-debug', action='store_true', default=False,
+                        help='save one masked training image before training, for checking whether the POSCO mask is applied correctly')
+    parser.add_argument('--posco-mask-debug-dir', default='./debug_posco_train_mask', type=str,
+                        help='output folder for the saved POSCO masked debug image')
 
     args = parser.parse_args()
 
