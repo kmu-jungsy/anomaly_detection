@@ -210,6 +210,8 @@ class POSCODataset(Dataset):
         self.mask_dir = getattr(c, 'posco_mask_dir', './mask')
         self.mask_threshold = int(getattr(c, 'posco_mask_threshold', 10))
         self._mask_cache = {}
+        self.save_train_mask_debug = bool(getattr(c, 'posco_save_train_mask_debug', False)) and self.apply_train_mask
+        self.mask_debug_dir = getattr(c, 'posco_mask_debug_dir', './debug_posco_train_mask')
 
         self.x, self.y = self.load_dataset_folder()
 
@@ -222,6 +224,11 @@ class POSCODataset(Dataset):
             T.ToTensor()
         ])
         self.normalize = T.Compose([T.Normalize(c.img_mean, c.img_std)])
+
+        # Optional: save one masked training image before training starts.
+        # This helps verify whether the POSCO ROI mask is applied correctly.
+        if self.save_train_mask_debug:
+            self._save_one_masked_train_debug_image()
 
     def __len__(self):
         return len(self.x)
@@ -259,6 +266,36 @@ class POSCODataset(Dataset):
         keep_mask = (mask_tensor > (self.mask_threshold / 255.0)).float()
         self._mask_cache[folder_name] = keep_mask
         return keep_mask
+
+    def _save_one_masked_train_debug_image(self):
+        """Save one masked training sample for visual debugging.
+
+        The saved image is BEFORE normalization, so it should look like a normal image:
+          - black mask area: black
+          - white mask area: original image
+        """
+        if len(self.x) == 0:
+            return
+
+        os.makedirs(self.mask_debug_dir, exist_ok=True)
+
+        x_path = self.x[0]
+        folder_name = self._get_train_folder_name(x_path)
+
+        x_img = Image.open(x_path).convert('RGB')
+        x = self.transform_x(x_img)
+        keep_mask = self._load_roi_mask(folder_name)
+        masked_x = x * keep_mask
+
+        original_stem = os.path.splitext(os.path.basename(x_path))[0]
+        save_path = os.path.join(
+            self.mask_debug_dir,
+            f'{folder_name}_masked_debug_{original_stem}.jpg'
+        )
+
+        # masked_x is in [0, 1]. Convert to PIL and save as jpg.
+        T.ToPILImage()(masked_x.clamp(0, 1)).save(save_path)
+        print(f'[POSCO mask debug] saved masked training sample: {save_path}')
 
     def __getitem__(self, idx):
         x_path = self.x[idx]
