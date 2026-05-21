@@ -46,6 +46,39 @@ def load_keep_mask(mask_dir: str, folder_name: str, input_size, threshold: int =
     return keep_tensor
 
 
+
+
+def apply_keep_mask_to_anomaly_map(anomaly_map: np.ndarray, mask_dir: str, folder_name: str, threshold: int = 10) -> np.ndarray:
+    """Set anomaly scores in the black mask area to 0.
+
+    White/non-black mask area -> keep anomaly score.
+    Black mask area           -> force anomaly score to 0.
+
+    The mask is resized to the anomaly map resolution, so bbox/heatmap generation
+    only uses the valid ROI area.
+    """
+    if folder_name is None:
+        raise ValueError("folder_name is required to apply mask to anomaly map.")
+
+    mask_path = os.path.join(mask_dir, f"{folder_name}_mask.jpg")
+    if not os.path.isfile(mask_path):
+        raise FileNotFoundError(f"Mask file not found for folder {folder_name}: {mask_path}")
+
+    amap = np.asarray(anomaly_map, dtype=np.float32)
+    if amap.ndim != 2:
+        amap = np.squeeze(amap)
+
+    h, w = amap.shape[-2], amap.shape[-1]
+    mask_img = Image.open(mask_path).convert('L')
+    # Use NEAREST here to avoid creating gray pixels around the mask boundary.
+    mask_img = mask_img.resize((w, h), Image.NEAREST)
+    mask_np = np.array(mask_img, dtype=np.uint8)
+
+    keep = mask_np > threshold
+    filtered = amap.copy()
+    filtered[~keep] = 0.0
+    return filtered
+
 def apply_keep_mask_to_pil(img: Image.Image, mask_dir: str, folder_name: str, input_size, threshold: int = 10) -> Image.Image:
     """Return a masked copy of img for model input.
 
@@ -551,6 +584,15 @@ def run_one_folder(args, folder_name: str):
             if torch.is_tensor(final_map):
                 final_map = final_map.detach().cpu().numpy()
 
+            # Force anomaly score to 0 in the black masked-out area before bbox/heatmap generation.
+            if args.apply_test_mask:
+                final_map = apply_keep_mask_to_anomaly_map(
+                    anomaly_map=final_map,
+                    mask_dir=args.mask_dir,
+                    folder_name=folder_name,
+                    threshold=args.mask_threshold,
+                )
+
             # Save separately to avoid name collision between normal/abnormal.
             out_dir = os.path.join(args.output_dir, folder_name, label_names[b])
             if out_dir not in seen_dirs:
@@ -619,6 +661,15 @@ def run_single_model(args):
             final_map = final_maps[b]
             if torch.is_tensor(final_map):
                 final_map = final_map.detach().cpu().numpy()
+
+            # Force anomaly score to 0 in the black masked-out area before bbox/heatmap generation.
+            if args.apply_test_mask:
+                final_map = apply_keep_mask_to_anomaly_map(
+                    anomaly_map=final_map,
+                    mask_dir=args.mask_dir,
+                    folder_name=folder_names[b],
+                    threshold=args.mask_threshold,
+                )
 
             out_dir = os.path.join(args.output_dir, label_names[b])
             if out_dir not in seen_dirs:
