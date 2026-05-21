@@ -24,6 +24,52 @@ from utils import load_weights
 from rectified_flow_train_posco import MultiScaleRF, msflow_forward, rf_transport, minmax_norm
 
 
+
+def load_keep_mask(mask_dir: str, folder_name: str, input_size, threshold: int = 10) -> torch.Tensor:
+    """Load folder-specific ROI mask as a tensor.
+
+    White/non-black area -> 1.0, keep original image pixels.
+    Black area           -> 0.0, make image pixels black.
+
+    Returned shape: [3, H, W]
+    """
+    mask_path = os.path.join(mask_dir, f"{folder_name}_mask.jpg")
+    if not os.path.isfile(mask_path):
+        raise FileNotFoundError(f"Mask file not found for folder {folder_name}: {mask_path}")
+
+    mask_img = Image.open(mask_path).convert('L')
+    mask_img = mask_img.resize((input_size[1], input_size[0]), Image.BILINEAR)
+    mask_np = np.array(mask_img, dtype=np.uint8)
+
+    keep_np = (mask_np > threshold).astype(np.float32)
+    keep_tensor = torch.from_numpy(keep_np).unsqueeze(0).repeat(3, 1, 1)
+    return keep_tensor
+
+
+def apply_keep_mask_to_pil(img: Image.Image, mask_dir: str, folder_name: str, input_size, threshold: int = 10) -> Image.Image:
+    """Return a masked copy of img for model input.
+
+    The original PIL image passed to this function is not modified.
+    """
+    img_resized = img.copy().resize((input_size[1], input_size[0]), Image.BILINEAR)
+    img_np = np.array(img_resized, dtype=np.uint8)
+
+    mask_path = os.path.join(mask_dir, f"{folder_name}_mask.jpg")
+    if not os.path.isfile(mask_path):
+        raise FileNotFoundError(f"Mask file not found for folder {folder_name}: {mask_path}")
+
+    mask_img = Image.open(mask_path).convert('L')
+    mask_img = mask_img.resize((input_size[1], input_size[0]), Image.BILINEAR)
+    mask_np = np.array(mask_img, dtype=np.uint8)
+
+    # mask white area -> keep original pixels
+    # mask black area -> set pixels to black
+    keep = mask_np > threshold
+    masked_np = img_np.copy()
+    masked_np[~keep] = 0
+    return Image.fromarray(masked_np)
+
+
 class PoscoTestFolderDataset(Dataset):
     """
     POSCO test dataset for one subfolder/class.
@@ -37,16 +83,21 @@ class PoscoTestFolderDataset(Dataset):
       data/posco/test/normal/02/*.png
       data/posco/test/abnormal/02/*.png
     """
-    def __init__(self, data_root: str, folder_name: str, input_size=(512, 512), img_mean=None, img_std=None):
+    def __init__(self, data_root: str, folder_name: str, input_size=(512, 512), img_mean=None, img_std=None,
+                 apply_test_mask: bool = False, mask_dir: str = './mask', mask_threshold: int = 10,
+                 save_masked_debug: bool = False, masked_debug_dir: str = './debug_posco_test_mask'):
         self.data_root = data_root
         self.folder_name = folder_name
         self.input_size = input_size
+        self.apply_test_mask = apply_test_mask
+        self.mask_dir = mask_dir
+        self.mask_threshold = mask_threshold
+        self.save_masked_debug = save_masked_debug
+        self.masked_debug_dir = masked_debug_dir
+        self._saved_debug = False
         self.img_info_list = self._collect_images(data_root, folder_name)
-        self.transform = T.Compose([
-            T.Resize(input_size, InterpolationMode.BILINEAR),
-            T.ToTensor(),
-            T.Normalize(img_mean, img_std),
-        ])
+        self.to_tensor = T.ToTensor()
+        self.normalize = T.Normalize(img_mean, img_std)
 
     @staticmethod
     def _collect_images(data_root: str, folder_name: str):
@@ -76,8 +127,29 @@ class PoscoTestFolderDataset(Dataset):
 
     def __getitem__(self, idx):
         img_path, label_name, folder_name, fname = self.img_info_list[idx]
-        img = Image.open(img_path).convert('RGB')
-        x = self.transform(img)
+        original_img = Image.open(img_path).convert('RGB')
+
+        # Use a masked copy only for model input. The original image file is never modified.
+        if self.apply_test_mask:
+            model_img = apply_keep_mask_to_pil(
+                original_img,
+                mask_dir=self.mask_dir,
+                folder_name=folder_name,
+                input_size=self.input_size,
+                threshold=self.mask_threshold,
+            )
+
+            if self.save_masked_debug and not self._saved_debug:
+                debug_dir = os.path.join(self.masked_debug_dir, folder_name, label_name)
+                os.makedirs(debug_dir, exist_ok=True)
+                stem, ext = os.path.splitext(fname)
+                ext = ext if ext else '.jpg'
+                model_img.save(os.path.join(debug_dir, f"{stem}_masked_input{ext}"))
+                self._saved_debug = True
+        else:
+            model_img = original_img.resize((self.input_size[1], self.input_size[0]), Image.BILINEAR)
+
+        x = self.normalize(self.to_tensor(model_img))
         return x, img_path, label_name, folder_name, fname
 
 
@@ -93,15 +165,20 @@ class PoscoFlatTestDataset(Dataset):
     This also supports nested folders under normal/abnormal, but outputs are grouped
     only by label name: normal or abnormal.
     """
-    def __init__(self, data_root: str, input_size=(512, 512), img_mean=None, img_std=None):
+    def __init__(self, data_root: str, input_size=(512, 512), img_mean=None, img_std=None,
+                 apply_test_mask: bool = False, mask_dir: str = './mask', mask_threshold: int = 10,
+                 save_masked_debug: bool = False, masked_debug_dir: str = './debug_posco_test_mask'):
         self.data_root = data_root
         self.input_size = input_size
+        self.apply_test_mask = apply_test_mask
+        self.mask_dir = mask_dir
+        self.mask_threshold = mask_threshold
+        self.save_masked_debug = save_masked_debug
+        self.masked_debug_dir = masked_debug_dir
+        self._saved_debug = False
         self.img_info_list = self._collect_images(data_root)
-        self.transform = T.Compose([
-            T.Resize(input_size, InterpolationMode.BILINEAR),
-            T.ToTensor(),
-            T.Normalize(img_mean, img_std),
-        ])
+        self.to_tensor = T.ToTensor()
+        self.normalize = T.Normalize(img_mean, img_std)
 
     @staticmethod
     def _collect_images(data_root: str):
@@ -122,15 +199,16 @@ class PoscoFlatTestDataset(Dataset):
                     img_path = os.path.join(dirpath, fname)
                     # Keep flat output safe even when nested input folders have same filenames.
                     save_fname = rel_prefix + fname
-                    img_info.append((img_path, label_name, save_fname))
+                    folder_name = rel_dir.split(os.sep)[0] if rel_dir != '.' else None
+                    img_info.append((img_path, label_name, folder_name, save_fname))
 
         assert len(img_info) > 0, (
             f"No POSCO test images found. Expected images under:\n"
             f"  {os.path.join(data_root, 'normal')}\n"
             f"  {os.path.join(data_root, 'abnormal')}"
         )
-        normal_count = sum(1 for _, label, _ in img_info if label == 'normal')
-        abnormal_count = sum(1 for _, label, _ in img_info if label == 'abnormal')
+        normal_count = sum(1 for _, label, _, _ in img_info if label == 'normal')
+        abnormal_count = sum(1 for _, label, _, _ in img_info if label == 'abnormal')
         print(f"[INFO] POSCO flat test images: normal={normal_count}, abnormal={abnormal_count}")
         return img_info
 
@@ -138,10 +216,36 @@ class PoscoFlatTestDataset(Dataset):
         return len(self.img_info_list)
 
     def __getitem__(self, idx):
-        img_path, label_name, save_fname = self.img_info_list[idx]
-        img = Image.open(img_path).convert('RGB')
-        x = self.transform(img)
-        return x, img_path, label_name, save_fname
+        img_path, label_name, folder_name, save_fname = self.img_info_list[idx]
+        original_img = Image.open(img_path).convert('RGB')
+
+        if self.apply_test_mask:
+            if folder_name is None:
+                raise ValueError(
+                    f"Cannot choose mask for flat test image without subfolder: {img_path}. "
+                    "Use data/posco/test/{normal,abnormal}/02/*.jpg style folders, "
+                    "or use --visualize-by-folder."
+                )
+            model_img = apply_keep_mask_to_pil(
+                original_img,
+                mask_dir=self.mask_dir,
+                folder_name=folder_name,
+                input_size=self.input_size,
+                threshold=self.mask_threshold,
+            )
+
+            if self.save_masked_debug and not self._saved_debug:
+                debug_dir = os.path.join(self.masked_debug_dir, folder_name, label_name)
+                os.makedirs(debug_dir, exist_ok=True)
+                stem, ext = os.path.splitext(save_fname)
+                ext = ext if ext else '.jpg'
+                model_img.save(os.path.join(debug_dir, f"{stem}_masked_input{ext}"))
+                self._saved_debug = True
+        else:
+            model_img = original_img.resize((self.input_size[1], self.input_size[0]), Image.BILINEAR)
+
+        x = self.normalize(self.to_tensor(model_img))
+        return x, img_path, label_name, folder_name, save_fname
 
 def build_msflow(cfg, ckpt_path: str):
     extractor, output_channels = build_extractor(cfg)
@@ -232,28 +336,36 @@ def save_outputs(img_tensor: torch.Tensor,
                  threshold: float,
                  min_area: int,
                  save_size=(1920, 1080),
-                 save_heatmap: bool = True):
+                 save_heatmap: bool = True,
+                 original_image_path: Optional[str] = None):
     """Save bbox image and heatmap image together in the same output folder.
 
-    For example:
-      results_bboxes_posco_rf_test/normal/frame_000001_bbox.jpg
-      results_bboxes_posco_rf_test/normal/frame_000001_heatmap.jpg
+    If original_image_path is given, bboxes are drawn on the original unmasked test image.
+    The model can use a masked tensor, but visualization remains on the original image.
     """
     os.makedirs(out_dir, exist_ok=True)
 
-    mean = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
-    std = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
-    img_u8 = ((img_tensor.cpu() * std + mean).clamp(0, 1) * 255).byte()
-    img_pil = Image.fromarray(img_u8.permute(1, 2, 0).numpy())
+    if original_image_path is not None:
+        img_pil = Image.open(original_image_path).convert('RGB')
+    else:
+        mean = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
+        std = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
+        img_u8 = ((img_tensor.cpu() * std + mean).clamp(0, 1) * 255).byte()
+        img_pil = Image.fromarray(img_u8.permute(1, 2, 0).numpy())
 
     bboxes = anomaly_map_to_bboxes(anomaly_map, threshold=threshold, min_area=min_area)
 
     target_w, target_h = save_size
-    src_w, src_h = img_pil.size
     resized_img = img_pil.resize((target_w, target_h), Image.BILINEAR)
 
-    scale_x = target_w / src_w
-    scale_y = target_h / src_h
+    # anomaly_map is produced at model input resolution, usually 512x512.
+    amap = np.asarray(anomaly_map)
+    if amap.ndim != 2:
+        amap = np.squeeze(amap)
+    map_h, map_w = amap.shape[-2], amap.shape[-1]
+
+    scale_x = target_w / map_w
+    scale_y = target_h / map_h
     scaled_bboxes = [
         (int(x0 * scale_x), int(y0 * scale_y), int(x1 * scale_x), int(y1 * scale_y))
         for x0, y0, x1, y1 in bboxes
@@ -274,6 +386,7 @@ def save_outputs(img_tensor: torch.Tensor,
         )
 
     return scaled_bboxes
+
 
 
 @torch.no_grad()
@@ -337,8 +450,10 @@ def discover_folder_names(args) -> List[str]:
     normal_base = os.path.join(args.data_root, 'normal')
     abnormal_base = os.path.join(args.data_root, 'abnormal')
 
+    # Discover folders from checkpoints and abnormal/<folder>.
+    # normal/<folder> is optional because some POSCO test setups only visualize abnormal images.
     candidate_sets = []
-    for base in [msflow_base, rf_base, normal_base, abnormal_base]:
+    for base in [msflow_base, rf_base, abnormal_base]:
         if os.path.isdir(base):
             candidate_sets.append({d for d in os.listdir(base) if os.path.isdir(os.path.join(base, d))})
         else:
@@ -391,6 +506,11 @@ def run_one_folder(args, folder_name: str):
         input_size=cfg.input_size,
         img_mean=cfg.img_mean,
         img_std=cfg.img_std,
+        apply_test_mask=args.apply_test_mask,
+        mask_dir=args.mask_dir,
+        mask_threshold=args.mask_threshold,
+        save_masked_debug=args.save_masked_test_debug,
+        masked_debug_dir=args.masked_test_debug_dir,
     )
     loader = DataLoader(
         dataset,
@@ -445,6 +565,7 @@ def run_one_folder(args, folder_name: str):
                 threshold=args.threshold,
                 min_area=args.min_area,
                 save_heatmap=args.save_heatmap,
+                original_image_path=img_paths[b],
             )
 
     fps = total_processed / max(time.time() - start, 1e-6)
@@ -461,8 +582,17 @@ def run_single_model(args):
     assert os.path.isfile(args.msflow_ckpt), f"MSFlow checkpoint not found: {args.msflow_ckpt}"
     assert os.path.isfile(args.rf_ckpt), f"RF checkpoint not found: {args.rf_ckpt}"
 
-    dataset = PoscoFlatTestDataset(args.data_root, input_size=cfg.input_size,
-                                   img_mean=cfg.img_mean, img_std=cfg.img_std)
+    dataset = PoscoFlatTestDataset(
+        args.data_root,
+        input_size=cfg.input_size,
+        img_mean=cfg.img_mean,
+        img_std=cfg.img_std,
+        apply_test_mask=args.apply_test_mask,
+        mask_dir=args.mask_dir,
+        mask_threshold=args.mask_threshold,
+        save_masked_debug=args.save_masked_test_debug,
+        masked_debug_dir=args.masked_test_debug_dir,
+    )
     loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False,
                         num_workers=args.workers, pin_memory=True)
 
@@ -470,7 +600,7 @@ def run_single_model(args):
     extractor, parallel_flows, fusion_flow = build_msflow(cfg, args.msflow_ckpt)
 
     print('[INFO] Initializing RF model...')
-    init_imgs, _, _, _ = next(iter(loader))
+    init_imgs, _, _, _, _ = next(iter(loader))
     init_imgs = init_imgs.to(cfg.device, non_blocking=True)
     with torch.no_grad():
         _, z_fused_list, _ = msflow_forward(cfg, extractor, parallel_flows, fusion_flow, init_imgs, return_pre_fusion=True)
@@ -480,7 +610,7 @@ def run_single_model(args):
     total_processed = 0
     start = time.time()
 
-    for imgs, img_paths, label_names, fnames in loader:
+    for imgs, img_paths, label_names, folder_names, fnames in loader:
         imgs = imgs.to(cfg.device, non_blocking=True)
         final_maps = get_final_localization_map(cfg, extractor, parallel_flows, fusion_flow, rf_model, imgs, args.rf_steps)
         total_processed += imgs.shape[0]
@@ -503,6 +633,7 @@ def run_single_model(args):
                 args.threshold,
                 args.min_area,
                 save_heatmap=args.save_heatmap,
+                original_image_path=img_paths[b],
             )
 
     fps = total_processed / max(time.time() - start, 1e-6)
@@ -520,6 +651,16 @@ def main():
                         help='Save pure heatmap image next to bbox image in the same folder. Default: True')
     parser.add_argument('--no_save_heatmap', dest='save_heatmap', action='store_false',
                         help='Disable heatmap saving')
+    parser.add_argument('--apply-test-mask', action='store_true', default=False,
+                        help='Apply folder-specific mask to a copy of each test image before model inference.')
+    parser.add_argument('--mask-dir', type=str, default='./mask',
+                        help='Directory containing 02_mask.jpg, 04_mask.jpg, ...')
+    parser.add_argument('--mask-threshold', type=int, default=10,
+                        help='Pixels <= threshold in mask are treated as black masked-out area.')
+    parser.add_argument('--save-masked-test-debug', action='store_true', default=False,
+                        help='Save one masked test input image per dataset object for checking.')
+    parser.add_argument('--masked-test-debug-dir', type=str, default='./debug_posco_test_mask',
+                        help='Directory for masked test debug images.')
 
     # Old single-model mode arguments.
     parser.add_argument('--msflow_ckpt', type=str,
