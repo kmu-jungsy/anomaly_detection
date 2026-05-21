@@ -199,10 +199,26 @@ class POSCODataset(Dataset):
         self.is_train = is_train
         self.input_size = c.input_size
         self.train_subdir = getattr(c, 'posco_train_subdir', None)
+
+        # POSCO ROI mask option.
+        # Example:
+        #   data/posco/train/02/*.jpg uses <posco_mask_dir>/02_mask.jpg
+        # Mask rule:
+        #   black pixels in mask -> make image black
+        #   white pixels in mask -> keep original image
+        self.apply_train_mask = bool(getattr(c, 'posco_apply_train_mask', False)) and self.is_train
+        self.mask_dir = getattr(c, 'posco_mask_dir', './mask')
+        self.mask_threshold = int(getattr(c, 'posco_mask_threshold', 10))
+        self._mask_cache = {}
+
         self.x, self.y = self.load_dataset_folder()
 
         self.transform_x = T.Compose([
             T.Resize(c.input_size, InterpolationMode.LANCZOS),
+            T.ToTensor()
+        ])
+        self.transform_roi_mask = T.Compose([
+            T.Resize(c.input_size, InterpolationMode.NEAREST),
             T.ToTensor()
         ])
         self.normalize = T.Compose([T.Normalize(c.img_mean, c.img_std)])
@@ -210,14 +226,57 @@ class POSCODataset(Dataset):
     def __len__(self):
         return len(self.x)
 
+    def _get_train_folder_name(self, image_path):
+        """Return POSCO train subfolder name such as '02', '04', ..."""
+        if self.train_subdir:
+            return self.train_subdir
+
+        train_root = os.path.join(self.dataset_path, 'train')
+        rel_path = os.path.relpath(image_path, train_root)
+        folder_name = rel_path.split(os.sep)[0]
+        return folder_name
+
+    def _load_roi_mask(self, folder_name):
+        """Load and cache binary ROI mask for a POSCO train folder.
+
+        Returned tensor shape: [1, H, W]
+          1.0 = keep original image
+          0.0 = black out image
+        """
+        if folder_name in self._mask_cache:
+            return self._mask_cache[folder_name]
+
+        mask_path = os.path.join(self.mask_dir, f'{folder_name}_mask.jpg')
+        if not os.path.isfile(mask_path):
+            raise FileNotFoundError(
+                f'Missing POSCO mask file for folder {folder_name}: {mask_path}'
+            )
+
+        mask_img = Image.open(mask_path).convert('L')
+        mask_tensor = self.transform_roi_mask(mask_img)
+
+        # White area remains 1, black area becomes 0.
+        keep_mask = (mask_tensor > (self.mask_threshold / 255.0)).float()
+        self._mask_cache[folder_name] = keep_mask
+        return keep_mask
+
     def __getitem__(self, idx):
         x_path = self.x[idx]
         y = int(self.y[idx])
 
-        x = Image.open(x_path).convert('RGB')
-        x = self.normalize(self.transform_x(x))
+        x_img = Image.open(x_path).convert('RGB')
+        x = self.transform_x(x_img)
 
-        # no pixel-level mask in POSCO
+        # Apply ROI mask only to POSCO training images.
+        # black mask area -> black image pixels, white mask area -> original pixels
+        if self.apply_train_mask:
+            folder_name = self._get_train_folder_name(x_path)
+            keep_mask = self._load_roi_mask(folder_name)
+            x = x * keep_mask
+
+        x = self.normalize(x)
+
+        # no pixel-level anomaly mask in POSCO
         mask = torch.zeros([1, *self.input_size], dtype=torch.float32)
 
         return x, y, mask
