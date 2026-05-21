@@ -48,35 +48,42 @@ def load_keep_mask(mask_dir: str, folder_name: str, input_size, threshold: int =
 
 
 
-def apply_keep_mask_to_anomaly_map(anomaly_map: np.ndarray, mask_dir: str, folder_name: str, threshold: int = 10) -> np.ndarray:
-    """Set anomaly scores in the black mask area to 0.
-
-    White/non-black mask area -> keep anomaly score.
-    Black mask area           -> force anomaly score to 0.
-
-    The mask is resized to the anomaly map resolution, so bbox/heatmap generation
-    only uses the valid ROI area.
+def apply_keep_mask_to_anomaly_map(
+    anomaly_map,
+    mask_dir,
+    folder_name,
+    threshold=10,
+    erode_pixels=5,
+):
     """
-    if folder_name is None:
-        raise ValueError("folder_name is required to apply mask to anomaly map.")
+    mask white area -> keep anomaly score
+    mask black area -> force anomaly score to 0
 
+    erode_pixels > 0:
+      shrink white ROI area slightly, so bbox does not appear on mask boundary.
+    """
     mask_path = os.path.join(mask_dir, f"{folder_name}_mask.jpg")
-    if not os.path.isfile(mask_path):
-        raise FileNotFoundError(f"Mask file not found for folder {folder_name}: {mask_path}")
 
-    amap = np.asarray(anomaly_map, dtype=np.float32)
-    if amap.ndim != 2:
-        amap = np.squeeze(amap)
+    mask_img = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
+    if mask_img is None:
+        raise FileNotFoundError(f"Mask not found: {mask_path}")
 
-    h, w = amap.shape[-2], amap.shape[-1]
-    mask_img = Image.open(mask_path).convert('L')
-    # Use NEAREST here to avoid creating gray pixels around the mask boundary.
-    mask_img = mask_img.resize((w, h), Image.NEAREST)
-    mask_np = np.array(mask_img, dtype=np.uint8)
+    h, w = anomaly_map.shape[:2]
 
-    keep = mask_np > threshold
-    filtered = amap.copy()
-    filtered[~keep] = 0.0
+    # Resize mask to anomaly map size
+    mask_img = cv2.resize(mask_img, (w, h), interpolation=cv2.INTER_NEAREST)
+
+    # white area = valid ROI
+    keep = (mask_img > threshold).astype(np.uint8)
+
+    # Shrink valid ROI slightly to remove boundary artifacts
+    if erode_pixels > 0:
+        kernel = np.ones((erode_pixels, erode_pixels), np.uint8)
+        keep = cv2.erode(keep, kernel, iterations=1)
+
+    filtered = anomaly_map.copy()
+    filtered[keep == 0] = 0.0
+
     return filtered
 
 def apply_keep_mask_to_pil(img: Image.Image, mask_dir: str, folder_name: str, input_size, threshold: int = 10) -> Image.Image:
@@ -336,8 +343,16 @@ def draw_bboxes_on_image(img: Image.Image, bboxes, color='red', width=3):
 def save_heatmap_outputs(anomaly_map: np.ndarray,
                          out_dir: str,
                          fname: str,
-                         save_size=(1920, 1080)):
-    """Save only the pure heatmap in the same folder as the bbox image."""
+                         save_size=(1920, 1080),
+                         mask_dir: Optional[str] = None,
+                         folder_name: Optional[str] = None,
+                         mask_threshold: int = 10):
+    """Save pure heatmap.
+
+    If mask_dir/folder_name are given, the black mask area is forced to black
+    AFTER resizing/colorizing the heatmap. This prevents interpolation from
+    leaking heatmap colors outside the ROI boundary.
+    """
     os.makedirs(out_dir, exist_ok=True)
 
     target_w, target_h = save_size
@@ -356,6 +371,20 @@ def save_heatmap_outputs(anomaly_map: np.ndarray,
     # OpenCV colormap is BGR, convert to RGB for PIL saving.
     heatmap_bgr = cv2.applyColorMap(amap_u8, cv2.COLORMAP_JET)
     heatmap_rgb = cv2.cvtColor(heatmap_bgr, cv2.COLOR_BGR2RGB)
+
+    # Important: even if anomaly_map is zero outside the ROI, INTER_LINEAR resize
+    # can visually bleed colors across the boundary. Therefore, apply the ROI mask
+    # again at the final heatmap resolution and make outside-ROI pixels black.
+    if mask_dir is not None and folder_name is not None:
+        mask_path = os.path.join(mask_dir, f"{folder_name}_mask.jpg")
+        if not os.path.isfile(mask_path):
+            raise FileNotFoundError(f"Mask file not found for folder {folder_name}: {mask_path}")
+        mask_img = Image.open(mask_path).convert('L')
+        mask_img = mask_img.resize((target_w, target_h), Image.NEAREST)
+        mask_np = np.array(mask_img, dtype=np.uint8)
+        keep = mask_np > mask_threshold
+        heatmap_rgb[~keep] = [0, 0, 0]
+
     heatmap_pil = Image.fromarray(heatmap_rgb)
 
     stem, ext = os.path.splitext(fname)
@@ -370,7 +399,10 @@ def save_outputs(img_tensor: torch.Tensor,
                  min_area: int,
                  save_size=(1920, 1080),
                  save_heatmap: bool = True,
-                 original_image_path: Optional[str] = None):
+                 original_image_path: Optional[str] = None,
+                 mask_dir: Optional[str] = None,
+                 folder_name: Optional[str] = None,
+                 mask_threshold: int = 10):
     """Save bbox image and heatmap image together in the same output folder.
 
     If original_image_path is given, bboxes are drawn on the original unmasked test image.
@@ -416,6 +448,9 @@ def save_outputs(img_tensor: torch.Tensor,
             out_dir=out_dir,
             fname=fname,
             save_size=save_size,
+            mask_dir=mask_dir,
+            folder_name=folder_name,
+            mask_threshold=mask_threshold,
         )
 
     return scaled_bboxes
@@ -591,6 +626,7 @@ def run_one_folder(args, folder_name: str):
                     mask_dir=args.mask_dir,
                     folder_name=folder_name,
                     threshold=args.mask_threshold,
+                    erode_pixels=args.mask_erode_pixels,
                 )
 
             # Save separately to avoid name collision between normal/abnormal.
@@ -608,6 +644,9 @@ def run_one_folder(args, folder_name: str):
                 min_area=args.min_area,
                 save_heatmap=args.save_heatmap,
                 original_image_path=img_paths[b],
+                mask_dir=args.mask_dir if args.apply_test_mask else None,
+                folder_name=folder_name if args.apply_test_mask else None,
+                mask_threshold=args.mask_threshold,
             )
 
     fps = total_processed / max(time.time() - start, 1e-6)
@@ -685,6 +724,9 @@ def run_single_model(args):
                 args.min_area,
                 save_heatmap=args.save_heatmap,
                 original_image_path=img_paths[b],
+                mask_dir=args.mask_dir if args.apply_test_mask else None,
+                folder_name=folder_names[b] if args.apply_test_mask else None,
+                mask_threshold=args.mask_threshold,
             )
 
     fps = total_processed / max(time.time() - start, 1e-6)
@@ -712,6 +754,8 @@ def main():
                         help='Save one masked test input image per dataset object for checking.')
     parser.add_argument('--masked-test-debug-dir', type=str, default='./debug_posco_test_mask',
                         help='Directory for masked test debug images.')
+    parser.add_argument('--mask-threshold', type=int, default=10)
+    parser.add_argument('--mask-erode-pixels', type=int, default=5)
 
     # Old single-model mode arguments.
     parser.add_argument('--msflow_ckpt', type=str,
