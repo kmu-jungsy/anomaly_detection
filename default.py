@@ -47,5 +47,7 @@ work_dir = './work_dirs'
 posco_apply_train_mask = False
 posco_mask_dir = './mask'
 posco_mask_threshold = 10
+posco_save_train_mask_debug = False
+posco_mask_debug_dir = './debug_posco_train_mask'
 posco_train_by_folder = False
 posco_train_subdir = None
