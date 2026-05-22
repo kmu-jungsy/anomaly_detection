@@ -372,19 +372,6 @@ def save_heatmap_outputs(anomaly_map: np.ndarray,
     heatmap_bgr = cv2.applyColorMap(amap_u8, cv2.COLORMAP_JET)
     heatmap_rgb = cv2.cvtColor(heatmap_bgr, cv2.COLOR_BGR2RGB)
 
-    # Important: even if anomaly_map is zero outside the ROI, INTER_LINEAR resize
-    # can visually bleed colors across the boundary. Therefore, apply the ROI mask
-    # again at the final heatmap resolution and make outside-ROI pixels black.
-    if mask_dir is not None and folder_name is not None:
-        mask_path = os.path.join(mask_dir, f"{folder_name}_mask.jpg")
-        if not os.path.isfile(mask_path):
-            raise FileNotFoundError(f"Mask file not found for folder {folder_name}: {mask_path}")
-        mask_img = Image.open(mask_path).convert('L')
-        mask_img = mask_img.resize((target_w, target_h), Image.NEAREST)
-        mask_np = np.array(mask_img, dtype=np.uint8)
-        keep = mask_np > mask_threshold
-        heatmap_rgb[~keep] = [0, 0, 0]
-
     heatmap_pil = Image.fromarray(heatmap_rgb)
 
     stem, ext = os.path.splitext(fname)
