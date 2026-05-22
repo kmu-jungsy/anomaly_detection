@@ -612,8 +612,6 @@ def run_single_model(args):
     rf_model = build_rf_from_batch(cfg.device, args.rf_ckpt, z_fused_list, args.rf_tdims, args.rf_depths)
 
     seen_dirs = set()
-    total_processed = 0
-    start = time.time()
 
     for imgs, img_paths, label_names, folder_names, fnames in loader:
         imgs = imgs.to(cfg.device, non_blocking=True)
@@ -654,10 +652,6 @@ def run_single_model(args):
                 folder_name=folder_names[b] if args.apply_test_mask else None,
                 mask_threshold=args.mask_threshold,
             )
-
-    fps = total_processed / max(time.time() - start, 1e-6)
-    print(datetime.datetime.now().strftime('[%Y-%m-%d-%H:%M:%S]'),
-          f'Done. Processed {total_processed} images, FPS: {fps:.1f}')
 
 
 def main():
