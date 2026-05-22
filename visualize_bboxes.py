@@ -53,14 +53,19 @@ def apply_keep_mask_to_anomaly_map(
     mask_dir,
     folder_name,
     threshold=10,
-    erode_pixels=5,
+    erode_pixels=0,
+    close_kernel=7,
 ):
     """
     mask white area -> keep anomaly score
     mask black area -> force anomaly score to 0
 
+    close_kernel > 0:
+      fill small black holes inside the white ROI area.
+
     erode_pixels > 0:
-      shrink white ROI area slightly, so bbox does not appear on mask boundary.
+      shrink white ROI area slightly. Default should normally be 0 because
+      erosion can remove valid white ROI boundary pixels.
     """
     mask_path = os.path.join(mask_dir, f"{folder_name}_mask.jpg")
 
@@ -76,7 +81,16 @@ def apply_keep_mask_to_anomaly_map(
     # white area = valid ROI
     keep = (mask_img > threshold).astype(np.uint8)
 
-    # Shrink valid ROI slightly to remove boundary artifacts
+    # Fill small black holes inside the white ROI.
+    # This fixes tiny black dots/noise inside mask white regions.
+    if close_kernel is not None and close_kernel > 0:
+        if close_kernel % 2 == 0:
+            close_kernel += 1
+        kernel = np.ones((close_kernel, close_kernel), np.uint8)
+        keep = cv2.morphologyEx(keep, cv2.MORPH_CLOSE, kernel)
+
+    # Optional: shrink valid ROI slightly to remove boundary artifacts.
+    # Use 0 if you do not want to remove any valid white ROI pixels.
     if erode_pixels > 0:
         kernel = np.ones((erode_pixels, erode_pixels), np.uint8)
         keep = cv2.erode(keep, kernel, iterations=1)
@@ -622,6 +636,7 @@ def run_one_folder(args, folder_name: str):
                     folder_name=folder_name,
                     threshold=args.mask_threshold,
                     erode_pixels=args.mask_erode_pixels,
+                    close_kernel=args.mask_close_kernel,
                 )
 
             # Save separately to avoid name collision between normal/abnormal.
@@ -703,6 +718,8 @@ def run_single_model(args):
                     mask_dir=args.mask_dir,
                     folder_name=folder_names[b],
                     threshold=args.mask_threshold,
+                    erode_pixels=args.mask_erode_pixels,
+                    close_kernel=args.mask_close_kernel,
                 )
 
             out_dir = os.path.join(args.output_dir, label_names[b])
@@ -749,7 +766,10 @@ def main():
                         help='Save one masked test input image per dataset object for checking.')
     parser.add_argument('--masked-test-debug-dir', type=str, default='./debug_posco_test_mask',
                         help='Directory for masked test debug images.')
-    parser.add_argument('--mask-erode-pixels', type=int, default=5)
+    parser.add_argument('--mask-erode-pixels', type=int, default=0,
+                        help='Shrink white ROI before bbox generation. Use 0 to keep ROI unchanged.')
+    parser.add_argument('--mask-close-kernel', type=int, default=7,
+                        help='Fill small black holes inside white ROI. Use 0 to disable.')
 
     # Old single-model mode arguments.
     parser.add_argument('--msflow_ckpt', type=str,
