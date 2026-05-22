@@ -80,7 +80,15 @@ def apply_keep_mask_to_anomaly_map(
     if erode_pixels > 0:
         kernel = np.ones((erode_pixels, erode_pixels), np.uint8)
         keep = cv2.erode(keep, kernel, iterations=1)
+        
+    debug_dir = "./debug_mask_check"
+    os.makedirs(debug_dir, exist_ok=True)
 
+    cv2.imwrite(
+        os.path.join(debug_dir, f"{folder_name}_keep_mask_used.png"),
+        (keep * 255).astype(np.uint8)
+    )
+    
     filtered = anomaly_map.copy()
     filtered[keep == 0] = 0.0
 
