@@ -25,29 +25,6 @@ from rectified_flow_train_posco import MultiScaleRF, msflow_forward, rf_transpor
 
 
 
-def load_keep_mask(mask_dir: str, folder_name: str, input_size, threshold: int = 10) -> torch.Tensor:
-    """Load folder-specific ROI mask as a tensor.
-
-    White/non-black area -> 1.0, keep original image pixels.
-    Black area           -> 0.0, make image pixels black.
-
-    Returned shape: [3, H, W]
-    """
-    mask_path = os.path.join(mask_dir, f"{folder_name}_mask.jpg")
-    if not os.path.isfile(mask_path):
-        raise FileNotFoundError(f"Mask file not found for folder {folder_name}: {mask_path}")
-
-    mask_img = Image.open(mask_path).convert('L')
-    mask_img = mask_img.resize((input_size[1], input_size[0]), Image.BILINEAR)
-    mask_np = np.array(mask_img, dtype=np.uint8)
-
-    keep_np = (mask_np > threshold).astype(np.float32)
-    keep_tensor = torch.from_numpy(keep_np).unsqueeze(0).repeat(3, 1, 1)
-    return keep_tensor
-
-
-
-
 def apply_keep_mask_to_anomaly_map(
     anomaly_map,
     mask_dir,
@@ -108,30 +85,6 @@ def apply_keep_mask_to_anomaly_map(
 
     return filtered
 
-def apply_keep_mask_to_pil(img: Image.Image, mask_dir: str, folder_name: str, input_size, threshold: int = 10) -> Image.Image:
-    """Return a masked copy of img for model input.
-
-    The original PIL image passed to this function is not modified.
-    """
-    img_resized = img.copy().resize((input_size[1], input_size[0]), Image.BILINEAR)
-    img_np = np.array(img_resized, dtype=np.uint8)
-
-    mask_path = os.path.join(mask_dir, f"{folder_name}_mask.jpg")
-    if not os.path.isfile(mask_path):
-        raise FileNotFoundError(f"Mask file not found for folder {folder_name}: {mask_path}")
-
-    mask_img = Image.open(mask_path).convert('L')
-    mask_img = mask_img.resize((input_size[1], input_size[0]), Image.BILINEAR)
-    mask_np = np.array(mask_img, dtype=np.uint8)
-
-    # mask white area -> keep original pixels
-    # mask black area -> set pixels to black
-    keep = mask_np > threshold
-    masked_np = img_np.copy()
-    masked_np[~keep] = 0
-    return Image.fromarray(masked_np)
-
-
 class PoscoTestFolderDataset(Dataset):
     """
     POSCO test dataset for one subfolder/class.
@@ -146,17 +99,13 @@ class PoscoTestFolderDataset(Dataset):
       data/posco/test/abnormal/02/*.png
     """
     def __init__(self, data_root: str, folder_name: str, input_size=(512, 512), img_mean=None, img_std=None,
-                 apply_test_mask: bool = False, mask_dir: str = './mask', mask_threshold: int = 10,
-                 save_masked_debug: bool = False, masked_debug_dir: str = './debug_posco_test_mask'):
+                 apply_test_mask: bool = False, mask_dir: str = './mask', mask_threshold: int = 10):
         self.data_root = data_root
         self.folder_name = folder_name
         self.input_size = input_size
         self.apply_test_mask = apply_test_mask
         self.mask_dir = mask_dir
         self.mask_threshold = mask_threshold
-        self.save_masked_debug = save_masked_debug
-        self.masked_debug_dir = masked_debug_dir
-        self._saved_debug = False
         self.img_info_list = self._collect_images(data_root, folder_name)
         self.to_tensor = T.ToTensor()
         self.normalize = T.Normalize(img_mean, img_std)
@@ -191,25 +140,11 @@ class PoscoTestFolderDataset(Dataset):
         img_path, label_name, folder_name, fname = self.img_info_list[idx]
         original_img = Image.open(img_path).convert('RGB')
 
-        # Use a masked copy only for model input. The original image file is never modified.
-        if self.apply_test_mask:
-            model_img = apply_keep_mask_to_pil(
-                original_img,
-                mask_dir=self.mask_dir,
-                folder_name=folder_name,
-                input_size=self.input_size,
-                threshold=self.mask_threshold,
-            )
-
-            if self.save_masked_debug and not self._saved_debug:
-                debug_dir = os.path.join(self.masked_debug_dir, folder_name, label_name)
-                os.makedirs(debug_dir, exist_ok=True)
-                stem, ext = os.path.splitext(fname)
-                ext = ext if ext else '.jpg'
-                model_img.save(os.path.join(debug_dir, f"{stem}_masked_input{ext}"))
-                self._saved_debug = True
-        else:
-            model_img = original_img.resize((self.input_size[1], self.input_size[0]), Image.BILINEAR)
+        # IMPORTANT:
+        # Do NOT apply the ROI mask to the model input.
+        # The model sees the original test image. The ROI mask is applied only
+        # later to the anomaly map before bbox generation.
+        model_img = original_img.resize((self.input_size[1], self.input_size[0]), Image.BILINEAR)
 
         x = self.normalize(self.to_tensor(model_img))
         return x, img_path, label_name, folder_name, fname
@@ -228,16 +163,12 @@ class PoscoFlatTestDataset(Dataset):
     only by label name: normal or abnormal.
     """
     def __init__(self, data_root: str, input_size=(512, 512), img_mean=None, img_std=None,
-                 apply_test_mask: bool = False, mask_dir: str = './mask', mask_threshold: int = 10,
-                 save_masked_debug: bool = False, masked_debug_dir: str = './debug_posco_test_mask'):
+                 apply_test_mask: bool = False, mask_dir: str = './mask', mask_threshold: int = 10):
         self.data_root = data_root
         self.input_size = input_size
         self.apply_test_mask = apply_test_mask
         self.mask_dir = mask_dir
         self.mask_threshold = mask_threshold
-        self.save_masked_debug = save_masked_debug
-        self.masked_debug_dir = masked_debug_dir
-        self._saved_debug = False
         self.img_info_list = self._collect_images(data_root)
         self.to_tensor = T.ToTensor()
         self.normalize = T.Normalize(img_mean, img_std)
@@ -281,30 +212,17 @@ class PoscoFlatTestDataset(Dataset):
         img_path, label_name, folder_name, save_fname = self.img_info_list[idx]
         original_img = Image.open(img_path).convert('RGB')
 
-        if self.apply_test_mask:
-            if folder_name is None:
-                raise ValueError(
-                    f"Cannot choose mask for flat test image without subfolder: {img_path}. "
-                    "Use data/posco/test/{normal,abnormal}/02/*.jpg style folders, "
-                    "or use --visualize-by-folder."
-                )
-            model_img = apply_keep_mask_to_pil(
-                original_img,
-                mask_dir=self.mask_dir,
-                folder_name=folder_name,
-                input_size=self.input_size,
-                threshold=self.mask_threshold,
+        # IMPORTANT:
+        # Do NOT apply the ROI mask to the model input.
+        # The model sees the original test image. The ROI mask is applied only
+        # later to the anomaly map before bbox generation.
+        if self.apply_test_mask and folder_name is None:
+            raise ValueError(
+                f"Cannot choose mask for flat test image without subfolder: {img_path}. "
+                "Use data/posco/test/{normal,abnormal}/02/*.jpg style folders, "
+                "or use --visualize-by-folder."
             )
-
-            if self.save_masked_debug and not self._saved_debug:
-                debug_dir = os.path.join(self.masked_debug_dir, folder_name, label_name)
-                os.makedirs(debug_dir, exist_ok=True)
-                stem, ext = os.path.splitext(save_fname)
-                ext = ext if ext else '.jpg'
-                model_img.save(os.path.join(debug_dir, f"{stem}_masked_input{ext}"))
-                self._saved_debug = True
-        else:
-            model_img = original_img.resize((self.input_size[1], self.input_size[0]), Image.BILINEAR)
+        model_img = original_img.resize((self.input_size[1], self.input_size[0]), Image.BILINEAR)
 
         x = self.normalize(self.to_tensor(model_img))
         return x, img_path, label_name, folder_name, save_fname
@@ -415,7 +333,7 @@ def save_outputs(img_tensor: torch.Tensor,
     """Save bbox image and heatmap image together in the same output folder.
 
     If original_image_path is given, bboxes are drawn on the original unmasked test image.
-    The model can use a masked tensor, but visualization remains on the original image.
+    The model input remains unmasked; bbox visualization is drawn on the original image.
     """
     os.makedirs(out_dir, exist_ok=True)
 
@@ -586,8 +504,6 @@ def run_one_folder(args, folder_name: str):
         apply_test_mask=args.apply_test_mask,
         mask_dir=args.mask_dir,
         mask_threshold=args.mask_threshold,
-        save_masked_debug=args.save_masked_test_debug,
-        masked_debug_dir=args.masked_test_debug_dir,
     )
     loader = DataLoader(
         dataset,
@@ -628,7 +544,7 @@ def run_one_folder(args, folder_name: str):
             if torch.is_tensor(final_map):
                 final_map = final_map.detach().cpu().numpy()
 
-            # Force anomaly score to 0 in the black masked-out area before bbox/heatmap generation.
+            # After inference, force anomaly score to 0 in the black masked-out area before bbox generation.
             if args.apply_test_mask:
                 final_map = apply_keep_mask_to_anomaly_map(
                     anomaly_map=final_map,
@@ -681,8 +597,6 @@ def run_single_model(args):
         apply_test_mask=args.apply_test_mask,
         mask_dir=args.mask_dir,
         mask_threshold=args.mask_threshold,
-        save_masked_debug=args.save_masked_test_debug,
-        masked_debug_dir=args.masked_test_debug_dir,
     )
     loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False,
                         num_workers=args.workers, pin_memory=True)
@@ -711,7 +625,7 @@ def run_single_model(args):
             if torch.is_tensor(final_map):
                 final_map = final_map.detach().cpu().numpy()
 
-            # Force anomaly score to 0 in the black masked-out area before bbox/heatmap generation.
+            # After inference, force anomaly score to 0 in the black masked-out area before bbox generation.
             if args.apply_test_mask:
                 final_map = apply_keep_mask_to_anomaly_map(
                     anomaly_map=final_map,
@@ -757,15 +671,11 @@ def main():
     parser.add_argument('--no_save_heatmap', dest='save_heatmap', action='store_false',
                         help='Disable heatmap saving')
     parser.add_argument('--apply-test-mask', action='store_true', default=True,
-                        help='Apply folder-specific mask to a copy of each test image before model inference.')
+                        help='Use folder-specific mask only after inference: bbox/anomaly scores outside ROI are suppressed. Model input remains the original image.')
     parser.add_argument('--mask-dir', type=str, default='./mask',
                         help='Directory containing 02_mask.jpg, 04_mask.jpg, ...')
     parser.add_argument('--mask-threshold', type=int, default=10,
                         help='Pixels <= threshold in mask are treated as black masked-out area.')
-    parser.add_argument('--save-masked-test-debug', action='store_true', default=False,
-                        help='Save one masked test input image per dataset object for checking.')
-    parser.add_argument('--masked-test-debug-dir', type=str, default='./debug_posco_test_mask',
-                        help='Directory for masked test debug images.')
     parser.add_argument('--mask-erode-pixels', type=int, default=0,
                         help='Shrink white ROI before bbox generation. Use 0 to keep ROI unchanged.')
     parser.add_argument('--mask-close-kernel', type=int, default=7,
