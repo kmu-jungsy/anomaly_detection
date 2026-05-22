@@ -733,7 +733,7 @@ def main():
     parser = argparse.ArgumentParser(description='Visualize POSCO bounding boxes from MSFlow+RF localization map')
     parser.add_argument('--data_root', type=str, default='./data/posco/test',
                         help='POSCO test root containing normal/*.jpg and abnormal/*.jpg')
-    parser.add_argument('--output_dir', type=str, default='./results_bboxes_posco_rf_test',
+    parser.add_argument('--output_dir', type=str, default='./results2',
                         help='Where to save images with bounding boxes')
     parser.add_argument('--save_heatmap', action='store_true', default=True,
                         help='Save pure heatmap image next to bbox image in the same folder. Default: True')
@@ -749,7 +749,6 @@ def main():
                         help='Save one masked test input image per dataset object for checking.')
     parser.add_argument('--masked-test-debug-dir', type=str, default='./debug_posco_test_mask',
                         help='Directory for masked test debug images.')
-    parser.add_argument('--mask-threshold', type=int, default=10)
     parser.add_argument('--mask-erode-pixels', type=int, default=5)
 
     # Old single-model mode arguments.
