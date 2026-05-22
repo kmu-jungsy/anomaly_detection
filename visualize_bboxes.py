@@ -739,7 +739,7 @@ def main():
                         help='Save pure heatmap image next to bbox image in the same folder. Default: True')
     parser.add_argument('--no_save_heatmap', dest='save_heatmap', action='store_false',
                         help='Disable heatmap saving')
-    parser.add_argument('--apply-test-mask', action='store_true', default=False,
+    parser.add_argument('--apply-test-mask', action='store_true', default=True,
                         help='Apply folder-specific mask to a copy of each test image before model inference.')
     parser.add_argument('--mask-dir', type=str, default='./mask',
                         help='Directory containing 02_mask.jpg, 04_mask.jpg, ...')
