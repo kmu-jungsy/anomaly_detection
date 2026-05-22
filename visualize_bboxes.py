@@ -531,7 +531,6 @@ def run_one_folder(args, folder_name: str):
 
     seen_dirs = set()
     total_processed = 0
-    start = time.time()
 
     for imgs, img_paths, label_names, folder_names, fnames in loader:
         imgs = imgs.to(cfg.device, non_blocking=True)
@@ -575,9 +574,6 @@ def run_one_folder(args, folder_name: str):
                 mask_threshold=args.mask_threshold,
             )
 
-    fps = total_processed / max(time.time() - start, 1e-6)
-    print(datetime.datetime.now().strftime('[%Y-%m-%d-%H:%M:%S]'),
-          f'Folder {folder_name}: processed {total_processed} images, FPS: {fps:.1f}')
 
     del extractor, parallel_flows, fusion_flow, rf_model
     if torch.cuda.is_available():
@@ -612,6 +608,7 @@ def run_single_model(args):
     rf_model = build_rf_from_batch(cfg.device, args.rf_ckpt, z_fused_list, args.rf_tdims, args.rf_depths)
 
     seen_dirs = set()
+    total_processed = 0
 
     for imgs, img_paths, label_names, folder_names, fnames in loader:
         imgs = imgs.to(cfg.device, non_blocking=True)
