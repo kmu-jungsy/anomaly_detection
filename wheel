@@ -1,1 +1,5 @@
-python -c "import torch; print(torch.__version__); print(torch.version.cuda); print(torch.cuda.is_available())"
+python -c "import numpy; print('numpy', numpy.__version__)"
+python -c "import scipy; print('scipy', scipy.__version__)"
+python -c "from PIL import Image; print('Pillow OK')"
+python -c "import tqdm; print('tqdm OK')"
+python -c "import torchvision; print('torchvision', torchvision.__version__)"
