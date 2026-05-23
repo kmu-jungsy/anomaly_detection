@@ -822,6 +822,7 @@ def train_rf(args):
         if rf_model is not None:
             ckpt_last = os.path.join(c.ckpt_dir, 'rf_last.pt')
             torch.save({'rf_model': rf_model.state_dict(), 'optimizer': optimizer.state_dict(), 'epoch': epoch}, ckpt_last)
+        print(f'epoch : {epoch}')
 
     if rf_model is not None:
         print(f'[RF] saved last checkpoint: {os.path.join(c.ckpt_dir, "rf_last.pt")}')
