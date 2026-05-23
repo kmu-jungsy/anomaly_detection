@@ -551,12 +551,12 @@ def build_args():
     parser.add_argument('--msflow-version', default='msflow_wide_resnet50_2_avgpool_pl258', type=str)
     parser.add_argument('--msflow-ckpt-name', default='last.pt', type=str)
 
-    parser.add_argument('--rf-epochs', default=100, type=int)
-    parser.add_argument('--rf-lr', default=5e-4, type=float)
+    parser.add_argument('--rf-epochs', default=10, type=int)
+    parser.add_argument('--rf-lr', default=1e-4, type=float)
     parser.add_argument('--rf-depth', default=4, type=int)
     parser.add_argument('--rf-tdim', default=64, type=int)
-    parser.add_argument('--rf-tdims', default=[128,128], type=int, nargs='+')
-    parser.add_argument('--rf-depths', default=[3,3], type=int, nargs='+')
+    parser.add_argument('--rf-tdims', default=[32,32], type=int, nargs='+')
+    parser.add_argument('--rf-depths', default=[2,2], type=int, nargs='+')
     parser.add_argument('--rf-steps', default=1, type=int)
     parser.add_argument('--rf-ckpt', default='', type=str)
 
