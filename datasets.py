@@ -223,7 +223,9 @@ class POSCODataset(Dataset):
         # no pixel-level anomaly mask in POSCO
         mask = torch.zeros([1, *self.input_size], dtype=torch.float32)
 
-        return x, y, mask
+        # Return image path too, so training code can choose folder/channel-specific ROI mask.
+        # Example path: data/posco/train/02/[CH002] ...jpg
+        return x, y, mask, x_path
 
     def load_dataset_folder(self):
         exts = ('.jpg', '.jpeg', '.png', '.bmp', '.tif', '.tiff', '.webp')
