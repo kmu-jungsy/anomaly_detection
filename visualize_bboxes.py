@@ -869,7 +869,10 @@ def run_single_model(args):
                 gt_boxes, gt_path = load_gt_boxes(args.gt_dir, eval_folder_name, fnames[b])
                 if gt_path is None:
                     missing_gt_images += 1
-                    if args.count_missing_gt_as_empty:
+                
+                    # Only normal images without GT are treated as empty/no-object images.
+                    # Abnormal images without GT are skipped because GT annotation is incomplete.
+                    if label_names[b] == "normal":
                         tp, fp, fn, matches = match_boxes_for_f1(
                             pred_boxes, [], iou_threshold=args.iou_threshold
                         )
@@ -877,7 +880,13 @@ def run_single_model(args):
                         total_fp += fp
                         total_fn += fn
                         evaluated_images += 1
-                        save_detection_eval_txt(out_dir, fnames[b], gt_path, pred_boxes, [], tp, fp, fn, matches)
+                        save_detection_eval_txt(
+                            out_dir, fnames[b], gt_path, pred_boxes, [], tp, fp, fn, matches
+                        )
+                    else:
+                        # abnormal image without GT annotation -> skip
+                        pass
+                
                 else:
                     tp, fp, fn, matches = match_boxes_for_f1(
                         pred_boxes, gt_boxes, iou_threshold=args.iou_threshold
@@ -886,7 +895,9 @@ def run_single_model(args):
                     total_fp += fp
                     total_fn += fn
                     evaluated_images += 1
-                    save_detection_eval_txt(out_dir, fnames[b], gt_path, pred_boxes, gt_boxes, tp, fp, fn, matches)
+                    save_detection_eval_txt(
+                        out_dir, fnames[b], gt_path, pred_boxes, gt_boxes, tp, fp, fn, matches
+                    )
 
     if args.eval_f1:
         summary_path = os.path.join(args.output_dir, 'f1_summary.txt')
