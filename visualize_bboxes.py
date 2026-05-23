@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import argparse
 import datetime
 import time
@@ -280,6 +281,170 @@ def draw_bboxes_on_image(img: Image.Image, bboxes, color='red', width=3):
     return out
 
 
+def image_name_to_gt_txt(fname: str) -> str:
+    """
+    Convert a frame image name to its matching GT txt name.
+
+    Example:
+      [CH010] 20251108141001-20251108141500_000000.jpg
+    -> [CH010] 20251108141001-20251108141500.txt
+    """
+    stem, _ = os.path.splitext(os.path.basename(fname))
+    stem = re.sub(r'_\d{6}$', '', stem)
+    return stem + '.txt'
+
+
+def find_gt_path(gt_dir: str, folder_name: Optional[str], fname: str) -> Optional[str]:
+    """Find matching GT txt. Try gt_dir/folder_name first, then gt_dir."""
+    gt_name = image_name_to_gt_txt(fname)
+
+    candidates = []
+    if folder_name is not None:
+        candidates.append(os.path.join(gt_dir, str(folder_name), gt_name))
+    candidates.append(os.path.join(gt_dir, gt_name))
+
+    for path in candidates:
+        if os.path.isfile(path):
+            return path
+    return None
+
+
+def load_gt_boxes(gt_dir: str, folder_name: Optional[str], fname: str):
+    """
+    Load GT boxes for an image.
+
+    Expected txt format per line:
+      x1 y1 x2 y2
+
+    Returns:
+      gt_boxes: list[(x1, y1, x2, y2)]
+      gt_path: matched txt path or None
+    """
+    gt_path = find_gt_path(gt_dir, folder_name, fname)
+    if gt_path is None:
+        return [], None
+
+    gt_boxes = []
+    with open(gt_path, 'r') as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            parts = line.replace(',', ' ').split()
+            if len(parts) < 4:
+                continue
+            try:
+                x1, y1, x2, y2 = map(float, parts[:4])
+            except ValueError:
+                continue
+            gt_boxes.append((int(round(x1)), int(round(y1)), int(round(x2)), int(round(y2))))
+
+    return gt_boxes, gt_path
+
+
+def compute_iou(box_a, box_b) -> float:
+    """Compute IoU for boxes in (x1, y1, x2, y2) format."""
+    ax1, ay1, ax2, ay2 = box_a
+    bx1, by1, bx2, by2 = box_b
+
+    inter_x1 = max(ax1, bx1)
+    inter_y1 = max(ay1, by1)
+    inter_x2 = min(ax2, bx2)
+    inter_y2 = min(ay2, by2)
+
+    inter_w = max(0, inter_x2 - inter_x1)
+    inter_h = max(0, inter_y2 - inter_y1)
+    inter_area = inter_w * inter_h
+
+    area_a = max(0, ax2 - ax1) * max(0, ay2 - ay1)
+    area_b = max(0, bx2 - bx1) * max(0, by2 - by1)
+    union = area_a + area_b - inter_area
+
+    if union <= 0:
+        return 0.0
+    return float(inter_area / union)
+
+
+def match_boxes_for_f1(pred_boxes, gt_boxes, iou_threshold: float = 0.2):
+    """
+    One-to-one greedy matching for object detection F1.
+
+    TP: prediction matched to one unmatched GT with IoU >= threshold.
+    FP: prediction not matched to any GT.
+    FN: GT not matched by any prediction.
+    """
+    pairs = []
+    for pi, pred in enumerate(pred_boxes):
+        for gi, gt in enumerate(gt_boxes):
+            iou = compute_iou(pred, gt)
+            if iou >= iou_threshold:
+                pairs.append((iou, pi, gi))
+
+    pairs.sort(reverse=True, key=lambda x: x[0])
+
+    matched_preds = set()
+    matched_gts = set()
+    matches = []
+
+    for iou, pi, gi in pairs:
+        if pi in matched_preds or gi in matched_gts:
+            continue
+        matched_preds.add(pi)
+        matched_gts.add(gi)
+        matches.append((pi, gi, iou))
+
+    tp = len(matches)
+    fp = len(pred_boxes) - tp
+    fn = len(gt_boxes) - tp
+    return tp, fp, fn, matches
+
+
+def compute_prf(tp: int, fp: int, fn: int):
+    precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+    recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+    f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
+    return precision, recall, f1
+
+
+def save_detection_eval_txt(out_dir: str, fname: str, gt_path: Optional[str], pred_boxes, gt_boxes, tp, fp, fn, matches):
+    stem, _ = os.path.splitext(fname)
+    eval_path = os.path.join(out_dir, f'{stem}_eval.txt')
+    precision, recall, f1 = compute_prf(tp, fp, fn)
+
+    with open(eval_path, 'w') as f:
+        f.write(f'image: {fname}\n')
+        f.write(f'gt_file: {gt_path if gt_path is not None else "None"}\n')
+        f.write(f'TP: {tp}\n')
+        f.write(f'FP: {fp}\n')
+        f.write(f'FN: {fn}\n')
+        f.write(f'precision: {precision:.6f}\n')
+        f.write(f'recall: {recall:.6f}\n')
+        f.write(f'f1: {f1:.6f}\n')
+        f.write('\n[pred_boxes] x1 y1 x2 y2\n')
+        for box in pred_boxes:
+            f.write(f'{box[0]} {box[1]} {box[2]} {box[3]}\n')
+        f.write('\n[gt_boxes] x1 y1 x2 y2\n')
+        for box in gt_boxes:
+            f.write(f'{box[0]} {box[1]} {box[2]} {box[3]}\n')
+        f.write('\n[matches] pred_index gt_index iou\n')
+        for pi, gi, iou in matches:
+            f.write(f'{pi} {gi} {iou:.6f}\n')
+
+
+def save_f1_summary(out_path: str, total_tp: int, total_fp: int, total_fn: int, evaluated_images: int, missing_gt_images: int):
+    precision, recall, f1 = compute_prf(total_tp, total_fp, total_fn)
+    with open(out_path, 'w') as f:
+        f.write(f'evaluated_images: {evaluated_images}\n')
+        f.write(f'missing_gt_images_skipped: {missing_gt_images}\n')
+        f.write(f'TP: {total_tp}\n')
+        f.write(f'FP: {total_fp}\n')
+        f.write(f'FN: {total_fn}\n')
+        f.write(f'micro_precision: {precision:.6f}\n')
+        f.write(f'micro_recall: {recall:.6f}\n')
+        f.write(f'micro_f1: {f1:.6f}\n')
+    return precision, recall, f1
+
+
 def save_heatmap_outputs(anomaly_map: np.ndarray,
                          out_dir: str,
                          fname: str,
@@ -368,6 +533,12 @@ def save_outputs(img_tensor: torch.Tensor,
 
     boxed = draw_bboxes_on_image(resized_img, scaled_bboxes, color='red', width=6)
     boxed.save(os.path.join(out_dir, f"{stem}_bbox{ext}"))
+
+    # Save predicted bbox coordinates used for drawing/evaluation.
+    pred_txt_path = os.path.join(out_dir, f"{stem}_pred_boxes.txt")
+    with open(pred_txt_path, 'w') as f:
+        for x1, y1, x2, y2 in scaled_bboxes:
+            f.write(f"{x1} {y1} {x2} {y2}\n")
 
     if save_heatmap:
         save_heatmap_outputs(
@@ -531,6 +702,11 @@ def run_one_folder(args, folder_name: str):
 
     seen_dirs = set()
     total_processed = 0
+    total_tp = 0
+    total_fp = 0
+    total_fn = 0
+    evaluated_images = 0
+    missing_gt_images = 0
 
     for imgs, img_paths, label_names, folder_names, fnames in loader:
         imgs = imgs.to(cfg.device, non_blocking=True)
@@ -560,7 +736,7 @@ def run_one_folder(args, folder_name: str):
                 os.makedirs(out_dir, exist_ok=True)
                 seen_dirs.add(out_dir)
 
-            save_outputs(
+            pred_boxes = save_outputs(
                 img_tensor=imgs[b],
                 anomaly_map=final_map,
                 out_dir=out_dir,
@@ -574,6 +750,39 @@ def run_one_folder(args, folder_name: str):
                 mask_threshold=args.mask_threshold,
             )
 
+            if args.eval_f1:
+                gt_boxes, gt_path = load_gt_boxes(args.gt_dir, folder_name, fname)
+                if gt_path is None:
+                    missing_gt_images += 1
+                    if args.count_missing_gt_as_empty:
+                        tp, fp, fn, matches = match_boxes_for_f1(
+                            pred_boxes, [], iou_threshold=args.iou_threshold
+                        )
+                        total_tp += tp
+                        total_fp += fp
+                        total_fn += fn
+                        evaluated_images += 1
+                        save_detection_eval_txt(out_dir, fname, gt_path, pred_boxes, [], tp, fp, fn, matches)
+                else:
+                    tp, fp, fn, matches = match_boxes_for_f1(
+                        pred_boxes, gt_boxes, iou_threshold=args.iou_threshold
+                    )
+                    total_tp += tp
+                    total_fp += fp
+                    total_fn += fn
+                    evaluated_images += 1
+                    save_detection_eval_txt(out_dir, fname, gt_path, pred_boxes, gt_boxes, tp, fp, fn, matches)
+
+
+    if args.eval_f1:
+        summary_path = os.path.join(args.output_dir, folder_name, 'f1_summary.txt')
+        os.makedirs(os.path.dirname(summary_path), exist_ok=True)
+        precision, recall, f1 = save_f1_summary(
+            summary_path, total_tp, total_fp, total_fn, evaluated_images, missing_gt_images
+        )
+        print(f'[F1] folder={folder_name} TP={total_tp} FP={total_fp} FN={total_fn} '
+              f'precision={precision:.4f} recall={recall:.4f} f1={f1:.4f} '
+              f'evaluated_images={evaluated_images} missing_gt={missing_gt_images}')
 
     del extractor, parallel_flows, fusion_flow, rf_model
     if torch.cuda.is_available():
@@ -609,6 +818,11 @@ def run_single_model(args):
 
     seen_dirs = set()
     total_processed = 0
+    total_tp = 0
+    total_fp = 0
+    total_fn = 0
+    evaluated_images = 0
+    missing_gt_images = 0
 
     for imgs, img_paths, label_names, folder_names, fnames in loader:
         imgs = imgs.to(cfg.device, non_blocking=True)
@@ -636,7 +850,7 @@ def run_single_model(args):
                 os.makedirs(out_dir, exist_ok=True)
                 seen_dirs.add(out_dir)
 
-            save_outputs(
+            pred_boxes = save_outputs(
                 imgs[b],
                 final_map,
                 out_dir,
@@ -649,6 +863,40 @@ def run_single_model(args):
                 folder_name=folder_names[b] if args.apply_test_mask else None,
                 mask_threshold=args.mask_threshold,
             )
+
+            if args.eval_f1:
+                eval_folder_name = folder_names[b]
+                gt_boxes, gt_path = load_gt_boxes(args.gt_dir, eval_folder_name, fnames[b])
+                if gt_path is None:
+                    missing_gt_images += 1
+                    if args.count_missing_gt_as_empty:
+                        tp, fp, fn, matches = match_boxes_for_f1(
+                            pred_boxes, [], iou_threshold=args.iou_threshold
+                        )
+                        total_tp += tp
+                        total_fp += fp
+                        total_fn += fn
+                        evaluated_images += 1
+                        save_detection_eval_txt(out_dir, fnames[b], gt_path, pred_boxes, [], tp, fp, fn, matches)
+                else:
+                    tp, fp, fn, matches = match_boxes_for_f1(
+                        pred_boxes, gt_boxes, iou_threshold=args.iou_threshold
+                    )
+                    total_tp += tp
+                    total_fp += fp
+                    total_fn += fn
+                    evaluated_images += 1
+                    save_detection_eval_txt(out_dir, fnames[b], gt_path, pred_boxes, gt_boxes, tp, fp, fn, matches)
+
+    if args.eval_f1:
+        summary_path = os.path.join(args.output_dir, 'f1_summary.txt')
+        os.makedirs(os.path.dirname(summary_path), exist_ok=True)
+        precision, recall, f1 = save_f1_summary(
+            summary_path, total_tp, total_fp, total_fn, evaluated_images, missing_gt_images
+        )
+        print(f'[F1] TP={total_tp} FP={total_fp} FN={total_fn} '
+              f'precision={precision:.4f} recall={recall:.4f} f1={f1:.4f} '
+              f'evaluated_images={evaluated_images} missing_gt={missing_gt_images}')
 
 
 def main():
@@ -671,6 +919,14 @@ def main():
                         help='Shrink white ROI before bbox generation. Use 0 to keep ROI unchanged.')
     parser.add_argument('--mask-close-kernel', type=int, default=7,
                         help='Fill small black holes inside white ROI. Use 0 to disable.')
+    parser.add_argument('--gt-dir', type=str, default='./gt',
+                        help='Directory containing GT txt files. Supports either gt/<name>.txt or gt/<folder>/<name>.txt.')
+    parser.add_argument('--eval-f1', action='store_true', default=False,
+                        help='Compute micro precision/recall/F1 using GT txt files and predicted boxes.')
+    parser.add_argument('--iou-threshold', type=float, default=0.2,
+                        help='IoU threshold for TP matching. Default: 0.2')
+    parser.add_argument('--count-missing-gt-as-empty', action='store_true', default=False,
+                        help='If enabled, images without matching GT txt are treated as no-object images; predictions become FP. Default: skip missing GT images.')
 
     # Old single-model mode arguments.
     parser.add_argument('--msflow_ckpt', type=str,
