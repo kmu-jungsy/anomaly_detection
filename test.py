@@ -7,25 +7,22 @@ def load_boxes(txt_path):
         x1 y1 x2 y2
         x1 y1 x2 y2
         ...
-
-    return:
-        [(x1, y1, x2, y2), ...]
     """
     boxes = []
-
     txt_path = Path(txt_path)
+
     if not txt_path.exists():
-        print(f"[Warning] File not found: {txt_path}")
-        return boxes
+        raise FileNotFoundError(f"File not found: {txt_path}")
 
     with open(txt_path, "r") as f:
-        for line in f:
+        for line_idx, line in enumerate(f, start=1):
             line = line.strip()
             if not line:
                 continue
 
             parts = line.replace(",", " ").split()
             if len(parts) < 4:
+                print(f"[Warning] Skip line {line_idx}: {line}")
                 continue
 
             x1, y1, x2, y2 = map(float, parts[:4])
@@ -37,7 +34,7 @@ def load_boxes(txt_path):
 def compute_iou(box_a, box_b):
     """
     box format:
-        x1, y1, x2, y2
+        (x1, y1, x2, y2)
     """
     ax1, ay1, ax2, ay2 = box_a
     bx1, by1, bx2, by2 = box_b
@@ -62,94 +59,52 @@ def compute_iou(box_a, box_b):
     return inter_area / union
 
 
-def match_boxes(pred_boxes, gt_boxes, iou_threshold=0.5):
-    """
-    One-to-one matching.
-
-    Returns:
-        matches: [(pred_idx, gt_idx, iou), ...]
-        unmatched_preds: [pred_idx, ...]
-        unmatched_gts: [gt_idx, ...]
-    """
-    candidates = []
-
-    # 모든 pred-GT 조합 IoU 계산
-    for pi, pred in enumerate(pred_boxes):
-        for gi, gt in enumerate(gt_boxes):
-            iou = compute_iou(pred, gt)
-
-            if iou >= iou_threshold:
-                candidates.append((iou, pi, gi))
-
-    # IoU 높은 것부터 매칭
-    candidates.sort(reverse=True, key=lambda x: x[0])
-
-    matched_preds = set()
-    matched_gts = set()
-    matches = []
-
-    for iou, pi, gi in candidates:
-        if pi in matched_preds:
-            continue
-        if gi in matched_gts:
-            continue
-
-        matched_preds.add(pi)
-        matched_gts.add(gi)
-        matches.append((pi, gi, iou))
-
-    unmatched_preds = [
-        i for i in range(len(pred_boxes))
-        if i not in matched_preds
-    ]
-
-    unmatched_gts = [
-        i for i in range(len(gt_boxes))
-        if i not in matched_gts
-    ]
-
-    return matches, unmatched_preds, unmatched_gts
-
-
-if __name__ == "__main__":
-    pred_txt = "pred_boxes.txt"
-    gt_txt = "gt_boxes.txt"
-
+def compute_ordered_iou(pred_txt, gt_txt, iou_threshold=0.5):
     pred_boxes = load_boxes(pred_txt)
     gt_boxes = load_boxes(gt_txt)
 
-    matches, unmatched_preds, unmatched_gts = match_boxes(
-        pred_boxes,
-        gt_boxes,
-        iou_threshold=0.5
-    )
+    n = min(len(pred_boxes), len(gt_boxes))
 
-    print("=== Pred boxes ===")
-    for i, box in enumerate(pred_boxes):
-        print(f"pred {i}: {box}")
+    print(f"Pred boxes: {len(pred_boxes)}")
+    print(f"GT boxes:   {len(gt_boxes)}")
+    print(f"Compare:    {n} pairs")
+    print()
 
-    print("\n=== GT boxes ===")
-    for i, box in enumerate(gt_boxes):
-        print(f"gt {i}: {box}")
+    tp = 0
+    fp = 0
+    fn = 0
 
-    print("\n=== IoU >= 0.5 Matches ===")
-    for pred_idx, gt_idx, iou in matches:
-        print(
-            f"pred {pred_idx} matched with gt {gt_idx} | "
-            f"IoU = {iou:.4f}"
-        )
+    for i in range(n):
+        pred = pred_boxes[i]
+        gt = gt_boxes[i]
+        iou = compute_iou(pred, gt)
 
-    print("\n=== Unmatched Pred Boxes ===")
-    for idx in unmatched_preds:
-        print(f"pred {idx}: {pred_boxes[idx]}")
+        is_match = iou >= iou_threshold
 
-    print("\n=== Unmatched GT Boxes ===")
-    for idx in unmatched_gts:
-        print(f"gt {idx}: {gt_boxes[idx]}")
+        if is_match:
+            tp += 1
+        else:
+            fp += 1
+            fn += 1
 
-    tp = len(matches)
-    fp = len(unmatched_preds)
-    fn = len(unmatched_gts)
+        print(f"Pair {i}")
+        print(f"  pred: {pred}")
+        print(f"  gt:   {gt}")
+        print(f"  IoU:  {iou:.4f}")
+        print(f"  match >= {iou_threshold}: {is_match}")
+        print()
+
+    # pred가 더 많으면 남은 pred는 FP
+    if len(pred_boxes) > len(gt_boxes):
+        extra_fp = len(pred_boxes) - len(gt_boxes)
+        fp += extra_fp
+        print(f"Extra pred boxes without GT: {extra_fp} -> FP")
+
+    # gt가 더 많으면 남은 gt는 FN
+    if len(gt_boxes) > len(pred_boxes):
+        extra_fn = len(gt_boxes) - len(pred_boxes)
+        fn += extra_fn
+        print(f"Extra GT boxes without pred: {extra_fn} -> FN")
 
     precision = tp / (tp + fp) if tp + fp > 0 else 0.0
     recall = tp / (tp + fn) if tp + fn > 0 else 0.0
@@ -159,10 +114,21 @@ if __name__ == "__main__":
         else 0.0
     )
 
-    print("\n=== Metrics ===")
+    print("\n=== Summary ===")
     print(f"TP: {tp}")
     print(f"FP: {fp}")
     print(f"FN: {fn}")
     print(f"Precision: {precision:.4f}")
-    print(f"Recall: {recall:.4f}")
-    print(f"F1: {f1:.4f}")
+    print(f"Recall:    {recall:.4f}")
+    print(f"F1:        {f1:.4f}")
+
+
+if __name__ == "__main__":
+    pred_txt = "pred_boxes.txt"
+    gt_txt = "gt_boxes.txt"
+
+    compute_ordered_iou(
+        pred_txt=pred_txt,
+        gt_txt=gt_txt,
+        iou_threshold=0.5,
+    )
