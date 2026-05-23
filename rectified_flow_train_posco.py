@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import math
 import time
 import datetime
@@ -66,7 +67,7 @@ class DRAEMAnomaly:
         noise = (noise - noise.min()) / (noise.max() - noise.min() + 1e-8)
         return (noise > thresh).astype(np.float32)
 
-    def __call__(self, x_norm: torch.Tensor) -> torch.Tensor:
+    def __call__(self, x_norm: torch.Tensor, img_path=None) -> torch.Tensor:
         x01 = _denorm(x_norm, self.img_mean, self.img_std).clamp(0, 1)
         _, H, W = x01.shape
         mask = self._perlin_mask(H, W)
@@ -86,6 +87,230 @@ class DRAEMAnomaly:
         out = (1 - mask3) * x01 + (1 - beta) * mask3 * x01 + beta * mask3 * texture
         out = out.clamp(0, 1)
         return _renorm(out, self.img_mean, self.img_std)
+
+
+class ROICutPasteAnomaly:
+    """Create object-like cut-paste pseudo anomalies only inside a POSCO ROI mask.
+
+    The ROI mask convention is:
+      white/non-black pixels -> valid rail/ROI area where pseudo objects may be pasted
+      black pixels           -> ignored area; never modified by cut-paste
+
+    This is designed for POSCO railway images, where real anomalies are objects/trains
+    appearing on or near the rail area. Unlike DRAEM-style color/texture corruption,
+    this creates localized object-like occlusions inside the ROI.
+    """
+    def __init__(self,
+                 img_mean,
+                 img_std,
+                 mask_dir: str = './mask',
+                 folder_name: Optional[str] = None,
+                 threshold: int = 10,
+                 min_frac: float = 0.04,
+                 max_frac: float = 0.16,
+                 max_tries: int = 80,
+                 use_random_mask_if_missing_folder: bool = True):
+        self.img_mean = img_mean
+        self.img_std = img_std
+        self.mask_dir = mask_dir
+        self.folder_name = folder_name
+        self.threshold = threshold
+        self.min_frac = min_frac
+        self.max_frac = max_frac
+        self.max_tries = max_tries
+        self.use_random_mask_if_missing_folder = use_random_mask_if_missing_folder
+        self._mask_cache = {}
+
+    def _available_mask_names(self):
+        if not os.path.isdir(self.mask_dir):
+            return []
+        names = []
+        for fname in sorted(os.listdir(self.mask_dir)):
+            low = fname.lower()
+            if not low.endswith(('.jpg', '.jpeg', '.png', '.bmp')):
+                continue
+            stem, _ = os.path.splitext(fname)
+            if stem.endswith('_mask'):
+                names.append(stem[:-len('_mask')])
+        return names
+
+    def _mask_exists(self, folder: str) -> bool:
+        candidates = [
+            os.path.join(self.mask_dir, f'{folder}_mask.jpg'),
+            os.path.join(self.mask_dir, f'{folder}_mask.png'),
+            os.path.join(self.mask_dir, f'{folder}_mask.jpeg'),
+            os.path.join(self.mask_dir, f'{folder}_mask.bmp'),
+        ]
+        return any(os.path.isfile(q) for q in candidates)
+
+    def _folder_from_img_path(self, img_path) -> Optional[str]:
+        if img_path is None:
+            return None
+        path = str(img_path)
+
+        # 1) Prefer the parent folder name, e.g. data/posco/train/02/image.jpg -> 02.
+        parent = os.path.basename(os.path.dirname(path))
+        candidates = []
+        if parent:
+            candidates.append(parent)
+
+        # 2) Also support names like [CH002] ...jpg -> 02_mask.jpg.
+        fname = os.path.basename(path)
+        m = re.search(r'\[CH0*([0-9]+)\]', fname, flags=re.IGNORECASE)
+        if m:
+            raw = m.group(1)
+            try:
+                val = int(raw)
+                candidates.extend([f'{val:02d}', f'{val % 100:02d}', raw, raw[-2:]])
+            except ValueError:
+                candidates.extend([raw, raw[-2:]])
+
+        # Keep order but remove duplicates.
+        seen = set()
+        for cand in candidates:
+            if not cand or cand in seen:
+                continue
+            seen.add(cand)
+            if self._mask_exists(cand):
+                return cand
+        return None
+
+    def _select_folder_name(self, img_path=None):
+        if self.folder_name:
+            return str(self.folder_name)
+
+        folder = self._folder_from_img_path(img_path)
+        if folder is not None:
+            return folder
+
+        names = self._available_mask_names()
+        if self.use_random_mask_if_missing_folder and names:
+            return str(np.random.choice(names))
+        return None
+
+    def _load_keep_mask(self, H: int, W: int, device, dtype, img_path=None):
+        folder = self._select_folder_name(img_path)
+        if folder is None:
+            # No ROI mask is available. Fall back to full image as valid ROI.
+            return torch.ones((H, W), device=device, dtype=torch.bool), 'full_image'
+
+        key = (folder, H, W)
+        if key not in self._mask_cache:
+            # Prefer jpg for compatibility with the user's current mask files.
+            candidates = [
+                os.path.join(self.mask_dir, f'{folder}_mask.jpg'),
+                os.path.join(self.mask_dir, f'{folder}_mask.png'),
+                os.path.join(self.mask_dir, f'{folder}_mask.jpeg'),
+            ]
+            mask_path = next((q for q in candidates if os.path.isfile(q)), None)
+            if mask_path is None:
+                raise FileNotFoundError(
+                    f'ROI mask not found for folder {folder}. Tried: {candidates}'
+                )
+
+            mask_img = Image.open(mask_path).convert('L')
+            mask_img = mask_img.resize((W, H), Image.NEAREST)
+            mask_np = np.array(mask_img, dtype=np.uint8)
+            keep_np = mask_np > self.threshold
+
+            # Fill tiny black holes inside the ROI so cut-paste placement is stable.
+            keep_u8 = keep_np.astype(np.uint8)
+            kernel = np.ones((7, 7), np.uint8)
+            keep_u8 = cv2.morphologyEx(keep_u8, cv2.MORPH_CLOSE, kernel)
+            self._mask_cache[key] = keep_u8.astype(bool)
+
+        keep = torch.from_numpy(self._mask_cache[key]).to(device=device)
+        return keep, folder
+
+    def _make_patch_mask(self, patch_h: int, patch_w: int, device):
+        # Object-like irregular rectangle/ellipse mask.
+        yy, xx = torch.meshgrid(
+            torch.linspace(-1, 1, patch_h, device=device),
+            torch.linspace(-1, 1, patch_w, device=device),
+            indexing='ij'
+        )
+        if torch.rand(1).item() < 0.5:
+            # ellipse-ish object
+            mask = (xx ** 2 / _rand_uniform(0.65, 1.15) + yy ** 2 / _rand_uniform(0.65, 1.15)) <= 1.0
+        else:
+            # rectangle with slight random dropout on border-like regions
+            mask = torch.ones((patch_h, patch_w), device=device, dtype=torch.bool)
+            if patch_h > 4 and patch_w > 4:
+                border = max(1, min(patch_h, patch_w) // 8)
+                mask[:border, :] &= (torch.rand((border, patch_w), device=device) > 0.15)
+                mask[-border:, :] &= (torch.rand((border, patch_w), device=device) > 0.15)
+                mask[:, :border] &= (torch.rand((patch_h, border), device=device) > 0.15)
+                mask[:, -border:] &= (torch.rand((patch_h, border), device=device) > 0.15)
+        return mask
+
+    def __call__(self, x_norm: torch.Tensor, img_path=None) -> torch.Tensor:
+        x01 = _denorm(x_norm, self.img_mean, self.img_std).clamp(0, 1)
+        C, H, W = x01.shape
+        device = x01.device
+
+        keep_roi, folder_used = self._load_keep_mask(H, W, device=device, dtype=x01.dtype, img_path=img_path)
+        ys, xs = torch.where(keep_roi)
+        if ys.numel() == 0:
+            return x_norm
+
+        # Patch size: object-like but not too large.
+        min_side = max(4, int(min(H, W) * self.min_frac))
+        max_side = max(min_side + 1, int(min(H, W) * self.max_frac))
+
+        for _ in range(self.max_tries):
+            patch_h = int(torch.randint(min_side, max_side + 1, (1,), device=device).item())
+            patch_w = int(torch.randint(min_side, max_side + 1, (1,), device=device).item())
+
+            # Pick a center inside ROI.
+            idx = int(torch.randint(0, ys.numel(), (1,), device=device).item())
+            cy = int(ys[idx].item())
+            cx = int(xs[idx].item())
+            y0 = max(0, min(H - patch_h, cy - patch_h // 2))
+            x0 = max(0, min(W - patch_w, cx - patch_w // 2))
+            y1 = y0 + patch_h
+            x1 = x0 + patch_w
+
+            roi_crop = keep_roi[y0:y1, x0:x1]
+            if roi_crop.float().mean().item() < 0.60:
+                continue
+
+            patch_mask = self._make_patch_mask(patch_h, patch_w, device=device) & roi_crop
+            if patch_mask.float().mean().item() < 0.15:
+                continue
+
+            out = x01.clone()
+
+            # Color palette roughly matching possible rail obstacles/trains/cones/shadows.
+            palette = torch.tensor([
+                [0.05, 0.05, 0.05],   # black/dark object
+                [0.18, 0.18, 0.16],   # dark gray
+                [0.45, 0.32, 0.12],   # brown
+                [0.78, 0.55, 0.18],   # yellow/orange
+                [0.60, 0.08, 0.05],   # red/brown
+            ], device=device, dtype=x01.dtype)
+            color = palette[int(torch.randint(0, palette.shape[0], (1,), device=device).item())]
+            color = color.view(C, 1, 1)
+
+            noise = torch.randn((C, patch_h, patch_w), device=device, dtype=x01.dtype) * _rand_uniform(0.02, 0.08)
+            patch = (color + noise).clamp(0, 1)
+
+            # Sometimes use a shifted crop from the same image, darkened/brightened, for more natural texture.
+            if torch.rand(1).item() < 0.35:
+                sy0 = int(torch.randint(0, max(1, H - patch_h + 1), (1,), device=device).item())
+                sx0 = int(torch.randint(0, max(1, W - patch_w + 1), (1,), device=device).item())
+                patch = x01[:, sy0:sy0 + patch_h, sx0:sx0 + patch_w].clone()
+                patch = (patch * _rand_uniform(0.35, 0.85) + color * _rand_uniform(0.15, 0.45)).clamp(0, 1)
+
+            alpha = _rand_uniform(0.75, 1.0)
+            region = out[:, y0:y1, x0:x1]
+            mask3 = patch_mask.unsqueeze(0)
+            region = torch.where(mask3, (1 - alpha) * region + alpha * patch, region)
+            out[:, y0:y1, x0:x1] = region
+
+            return _renorm(out.clamp(0, 1), self.img_mean, self.img_std)
+
+        # If no valid patch placement was found, leave the image unchanged.
+        return x_norm
 
 
 class TimeEmbedding(nn.Module):
@@ -237,7 +462,11 @@ def eval_rf_epoch(c, epoch: int, loader: DataLoader, extractor, parallel_flows, 
     diff_l01_list = [[], []]
 
     start = time.time()
-    for idx, (image, label, mask) in enumerate(loader):
+    for idx, batch in enumerate(loader):
+        if len(batch) == 4:
+            image, label, mask, _img_paths = batch
+        else:
+            image, label, mask = batch
         image = image.to(c.device, non_blocking=True)
         gt_label_list.extend(t2np(label))
         gt_mask_list.extend(t2np(mask))
@@ -330,6 +559,17 @@ def build_args():
     parser.add_argument('--rf-depths', default=[3,3], type=int, nargs='+')
     parser.add_argument('--rf-steps', default=1, type=int)
     parser.add_argument('--rf-ckpt', default='', type=str)
+
+    parser.add_argument('--pseudo-anomaly', default='roi-cutpaste', choices=['draem', 'roi-cutpaste'],
+                        help='Pseudo anomaly generator for RF training. roi-cutpaste pastes object-like patches only inside POSCO ROI mask.')
+    parser.add_argument('--roi-mask-dir', default='./mask', type=str,
+                        help='Directory containing POSCO ROI masks such as 02_mask.jpg, 04_mask.jpg, ...')
+    parser.add_argument('--roi-mask-threshold', default=10, type=int,
+                        help='Pixels > threshold are treated as valid white ROI.')
+    parser.add_argument('--cutpaste-min-frac', default=0.04, type=float,
+                        help='Minimum pseudo object size as fraction of min(H, W).')
+    parser.add_argument('--cutpaste-max-frac', default=0.16, type=float,
+                        help='Maximum pseudo object size as fraction of min(H, W).')
 
     parser.add_argument('--data-path', default='', type=str)
     parser.add_argument('--work-dir', default='./work_dirs', type=str)
@@ -500,28 +740,57 @@ def train_rf(args):
 
     rf_model = None
     optimizer = None
-    anomaly_gen = DRAEMAnomaly(c.img_mean, c.img_std, beta_range=(0.1, 1.0))
+    # Select pseudo anomaly generator. For POSCO railway data, ROI cut-paste is usually
+    # more realistic than DRAEM-style color/texture corruption because real anomalies
+    # are often object-like occlusions on or near the rails.
+    roi_folder_name = getattr(c, 'posco_train_subdir', None)
+    if args.pseudo_anomaly == 'roi-cutpaste':
+        anomaly_gen = ROICutPasteAnomaly(
+            c.img_mean,
+            c.img_std,
+            mask_dir=args.roi_mask_dir,
+            folder_name=roi_folder_name,
+            threshold=args.roi_mask_threshold,
+            min_frac=args.cutpaste_min_frac,
+            max_frac=args.cutpaste_max_frac,
+        )
+        print(f'[RF] pseudo anomaly: ROI cut-paste, mask_dir={args.roi_mask_dir}, fixed_folder={roi_folder_name}; if fixed_folder is None, mask is selected from img_path parent folder or [CHxxx] name')
+    else:
+        anomaly_gen = DRAEMAnomaly(c.img_mean, c.img_std, beta_range=(0.1, 1.0))
+        print('[RF] pseudo anomaly: DRAEM-style Perlin texture')
     
     for epoch in range(args.rf_epochs):
         if rf_model is not None:
             rf_model.train()
-        for img, y, _ in train_loader:
+        for batch in train_loader:
+            if len(batch) == 4:
+                img, y, _, img_paths = batch
+                img_paths = list(img_paths)
+            else:
+                img, y, _ = batch
+                img_paths = [None] * img.shape[0]
+
             if y.sum().item() != 0:
+                normal_keep = (y == 0).cpu().tolist()
                 img = img[y == 0]
+                img_paths = [p for p, keep in zip(img_paths, normal_keep) if keep]
                 if img.numel() == 0:
                     continue
             img = img.to(c.device, non_blocking=True)
 
             p_identity = 0.10
             img_pseudo_list = []
-            for x in img:
+            for x, img_path in zip(img, img_paths):
                 if torch.rand(1).item() < p_identity:
                     x_pseudo = x
                 else:
-                    x_pseudo = anomaly_gen(x)
-            
+                    if args.pseudo_anomaly == 'roi-cutpaste':
+                        x_pseudo = anomaly_gen(x, img_path=img_path)
+                    else:
+                        x_pseudo = anomaly_gen(x)
+
                 img_pseudo_list.append(x_pseudo)
-            
+
             img_pseudo = torch.stack(img_pseudo_list, dim=0)
 
             with torch.no_grad():
